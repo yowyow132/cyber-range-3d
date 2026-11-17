@@ -4,11 +4,12 @@ Cyber Range 3D — ESP32 Wi-Fi 無線體感槍韌體範本 (WebSocket + 搖桿 +
 支援：
 1. Wi-Fi STA 連線 + 內建 RFC 6455 WebSocket Server (port 8765)
    -> 連線後 OLED 會顯示 ESP32 IP（例如 192.168.1.105:8765），在網頁點「📶 Wi-Fi 無線槍控」輸入即可！
-2. 既有 EZ Start Kit+ 按鍵與顯示（蜂鳴器保持靜音）：
-   - 按鈕 A (GPIO 5)：FIRE_DOWN / FIRE_UP
-   - 按鈕 B (GPIO 36)：RELOAD
+2. 既有 EZ Start Kit+ 按鍵、聲光回饋與顯示：
+   - 按鈕 A (GPIO 5)：FIRE_DOWN / FIRE_UP（含開火音效與槍口閃光）
+   - 按鈕 B (GPIO 36)：RELOAD（含上膛音效與藍光）
    - OLED：即時顯示 Wi-Fi IP、剩餘彈藥、HP、與目前狀態
-   - RGB NeoPixel：射擊白光、換彈黃光、受擊紅光、升級藍光
+   - RGB NeoPixel + 板載紅/黃/藍 LED：射擊橘白光、換彈藍光、受擊紅光、升級金光
+   - 蜂鳴器 (GPIO 14)：非阻塞合成音效（開火／空倉／換彈／受擊／升級／陣亡）
 3. 擴充硬體（買到零件接好線後，將下方開關改成 True 即可啟用）：
    - ENABLE_JOYSTICK = True：VRx=GPIO34, VRy=GPIO35, SW(下壓衝刺)=GPIO32 -> MOVE:x,y / DASH
    - ENABLE_MPU6050  = True：I2C (SDA=21, SCL=22, 0x68) -> AIM:dx,dy + 上抬體感跳躍 JUMP
@@ -37,6 +38,11 @@ WS_PORT = 8765
 
 ENABLE_JOYSTICK = False
 ENABLE_MPU6050 = False
+
+# 聲光回饋開關
+ENABLE_BUZZER = True
+ENABLE_LIGHT_FX = True
+BUZZER_DUTY = 320  # 蜂鳴器音量 (0~1023，建議 220~400)
 
 # 搖桿腳位建議使用 ADC1（避免與 Wi-Fi 衝突）
 PIN_JOY_X = 34
@@ -241,9 +247,71 @@ def draw_oled():
 
 
 def set_rgb(r, g, b):
-    for i in range(3):
+    if not ENABLE_LIGHT_FX:
+        r = g = b = 0
+    for i in range(NUM_PIXELS):
         np[i] = (r, g, b)
     np.write()
+
+
+def set_board_leds(r=0, y=0, b=0):
+    if not ENABLE_LIGHT_FX:
+        r = y = b = 0
+    try:
+        led_red.value(1 if r else 0)
+        led_yellow.value(1 if y else 0)
+        led_blue.value(1 if b else 0)
+    except Exception:
+        pass
+
+
+# 非阻塞音效序列：(freq_hz, duration_ms)，freq=0 代表靜音停頓
+SFX_PATTERNS = {
+    "fire": [(1450, 22), (760, 26), (420, 24)],
+    "empty": [(220, 35)],
+    "reload": [(440, 40), (660, 40), (880, 55)],
+    "hit": [(190, 55), (125, 85)],
+    "lvlup": [(523, 45), (659, 45), (784, 50), (1046, 85)],
+    "over": [(400, 70), (260, 80), (140, 140)],
+}
+_sfx_queue = []
+_sfx_step_end = 0
+
+
+def play_sfx(name):
+    global _sfx_queue, _sfx_step_end
+    if not ENABLE_BUZZER:
+        return
+    seq = SFX_PATTERNS.get(name)
+    if not seq:
+        return
+    _sfx_queue = list(seq)
+    _sfx_step_end = 0
+
+
+def update_sfx(now_ms):
+    global _sfx_queue, _sfx_step_end
+    if not ENABLE_BUZZER:
+        return
+    if _sfx_step_end != 0 and time.ticks_diff(now_ms, _sfx_step_end) < 0:
+        return
+    if _sfx_queue:
+        freq, dur = _sfx_queue.pop(0)
+        try:
+            if freq > 0:
+                buzzer.freq(freq)
+                buzzer.duty(BUZZER_DUTY)
+            else:
+                buzzer.duty(0)
+        except Exception:
+            pass
+        _sfx_step_end = time.ticks_add(now_ms, dur)
+    elif _sfx_step_end != 0:
+        _sfx_step_end = 0
+        try:
+            buzzer.duty(0)
+        except Exception:
+            pass
 
 
 def main():
@@ -275,10 +343,12 @@ def main():
     last_b_ms = 0
     last_joy_ms = 0
     last_oled_ms = 0
+    rgb_clear_ms = 0
     dirty = True
 
     draw_oled()
-    set_rgb(0, 20, 40)
+    set_rgb(0, 12, 24)
+    set_board_leds(0, 0, 1)
 
     while True:
         now = time.ticks_ms()
@@ -290,20 +360,37 @@ def main():
                     parts = line[2:].split(",")
                     if len(parts) >= 3:
                         try:
-                            ammo = int(parts[0])
-                            hp_pct = int(parts[1])
-                            state = parts[2]
-                            if len(parts) >= 4:
-                                max_ammo = max(1, int(parts[3]))
+                            new_ammo = int(parts[0])
+                            new_hp = int(parts[1])
+                            new_state = parts[2]
+                            new_max = max(1, int(parts[3])) if len(parts) >= 4 else max_ammo
+
+                            if new_state == "HIT" and (new_hp < hp_pct or state != "HIT"):
+                                set_rgb(160, 0, 0)
+                                set_board_leds(1, 0, 0)
+                                play_sfx("hit")
+                                rgb_clear_ms = time.ticks_add(now, 220)
+                            elif new_state == "LVLUP" and state != "LVLUP":
+                                set_rgb(120, 100, 0)
+                                set_board_leds(0, 1, 1)
+                                play_sfx("lvlup")
+                                rgb_clear_ms = time.ticks_add(now, 400)
+                            elif new_state == "RELOAD" and state != "RELOAD":
+                                set_rgb(0, 40, 120)
+                                set_board_leds(0, 0, 1)
+                                play_sfx("reload")
+                                rgb_clear_ms = time.ticks_add(now, 300)
+                            elif new_state == "OVER" and state != "OVER":
+                                set_rgb(50, 0, 0)
+                                set_board_leds(1, 0, 0)
+                                play_sfx("over")
+                                rgb_clear_ms = 0
+
+                            ammo = new_ammo
+                            hp_pct = new_hp
+                            state = new_state
+                            max_ammo = new_max
                             dirty = True
-                            if state == "HIT":
-                                set_rgb(80, 0, 0)
-                            elif state == "RELOAD":
-                                set_rgb(60, 40, 0)
-                            elif state == "LVLUP":
-                                set_rgb(0, 40, 80)
-                            else:
-                                set_rgb(0, 30, 15)
                         except ValueError:
                             pass
 
@@ -314,7 +401,16 @@ def main():
             last_a_ms = now
             if cur_a == 0:
                 ws.send_text("FIRE_DOWN\n")
-                set_rgb(60, 60, 60)
+                if ammo > 0 and state not in ("RELOAD", "OVER"):
+                    set_rgb(180, 95, 15)
+                    set_board_leds(0, 1, 0)
+                    play_sfx("fire")
+                    rgb_clear_ms = time.ticks_add(now, 70)
+                else:
+                    set_rgb(60, 0, 0)
+                    set_board_leds(1, 0, 0)
+                    play_sfx("empty")
+                    rgb_clear_ms = time.ticks_add(now, 80)
             else:
                 ws.send_text("FIRE_UP\n")
 
@@ -324,6 +420,10 @@ def main():
             last_b_ms = now
             if cur_b == 0:
                 ws.send_text("RELOAD\n")
+                set_rgb(0, 40, 120)
+                set_board_leds(0, 0, 1)
+                play_sfx("reload")
+                rgb_clear_ms = time.ticks_add(now, 300)
 
         # 3. 搖桿移動 + SW 下壓衝刺
         if ENABLE_JOYSTICK and joy_x and time.ticks_diff(now, last_joy_ms) > 35:
@@ -344,6 +444,17 @@ def main():
                 ws.send_text(f"AIM:{dx:.2f},{dy:.2f}\n")
             if jumped:
                 ws.send_text("JUMP\n")
+
+        # 5. 非阻塞音效與燈光歸位
+        update_sfx(now)
+        if rgb_clear_ms != 0 and time.ticks_diff(now, rgb_clear_ms) >= 0:
+            rgb_clear_ms = 0
+            if state == "OVER":
+                set_rgb(40, 0, 0)
+                set_board_leds(1, 0, 0)
+            else:
+                set_rgb(0, 12, 24)
+                set_board_leds(0, 0, 0)
 
         if dirty and time.ticks_diff(now, last_oled_ms) > 60:
             draw_oled()

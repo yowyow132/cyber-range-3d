@@ -1,11 +1,12 @@
 # ============================================
-# CYBER RANGE 3D — ESP32 體感槍控制與肉鴿同步端 (防抖+連發支援)
+# CYBER RANGE 3D — ESP32 體感槍控制與肉鴿同步端 (防抖+連發+聲光回饋)
 # ============================================
 # 硬體對應：
-#   按鈕 A (GPIO 5)  = 扣扳機 (送出 FIRE_DOWN / FIRE_UP)
-#   按鈕 B (GPIO 36) = 換彈夾 (送出 RELOAD)
+#   按鈕 A (GPIO 5)  = 扣扳機 (送出 FIRE_DOWN / FIRE_UP，含開火音效與槍口閃光)
+#   按鈕 B (GPIO 36) = 換彈夾 (送出 RELOAD，含上膛音效與藍光)
 #   OLED 螢幕        = 顯示子彈數(支援擴容)、血量條、即時狀態
-#   WS2812 RGB 燈    = 開火閃橘光、受傷閃紅光、換彈閃藍光、升級閃金光
+#   WS2812 RGB + LED = 開火閃橘光、受傷閃紅光、換彈閃藍光、升級閃金光
+#   蜂鳴器 (GPIO 14) = 非阻塞合成音效（開火／空倉／換彈／受擊／升級／陣亡）
 # ============================================
 
 from lib.ezkit import *
@@ -21,13 +22,75 @@ try:
 except:
     pass
 
+# 聲光回饋開關
+ENABLE_BUZZER = True
+ENABLE_LIGHT_FX = True
+BUZZER_DUTY = 320  # 蜂鳴器音量 (0~1023，建議 220~400)
+
 spoll = select.poll()
 spoll.register(sys.stdin, select.POLLIN)
 
 def set_rgb(r, g, b):
+    if not ENABLE_LIGHT_FX:
+        r = g = b = 0
     for i in range(NUM_PIXELS):
         np[i] = (r, g, b)
     np.write()
+
+def set_board_leds(r=0, y=0, b=0):
+    if not ENABLE_LIGHT_FX:
+        r = y = b = 0
+    try:
+        led_red.value(1 if r else 0)
+        led_yellow.value(1 if y else 0)
+        led_blue.value(1 if b else 0)
+    except Exception:
+        pass
+
+SFX_PATTERNS = {
+    "fire": [(1450, 22), (760, 26), (420, 24)],
+    "empty": [(220, 35)],
+    "reload": [(440, 40), (660, 40), (880, 55)],
+    "hit": [(190, 55), (125, 85)],
+    "lvlup": [(523, 45), (659, 45), (784, 50), (1046, 85)],
+    "over": [(400, 70), (260, 80), (140, 140)],
+}
+_sfx_queue = []
+_sfx_step_end = 0
+
+def play_sfx(name):
+    global _sfx_queue, _sfx_step_end
+    if not ENABLE_BUZZER:
+        return
+    seq = SFX_PATTERNS.get(name)
+    if not seq:
+        return
+    _sfx_queue = list(seq)
+    _sfx_step_end = 0
+
+def update_sfx(now_ms):
+    global _sfx_queue, _sfx_step_end
+    if not ENABLE_BUZZER:
+        return
+    if _sfx_step_end != 0 and time.ticks_diff(now_ms, _sfx_step_end) < 0:
+        return
+    if _sfx_queue:
+        freq, dur = _sfx_queue.pop(0)
+        try:
+            if freq > 0:
+                buzzer.freq(freq)
+                buzzer.duty(BUZZER_DUTY)
+            else:
+                buzzer.duty(0)
+        except Exception:
+            pass
+        _sfx_step_end = time.ticks_add(now_ms, dur)
+    elif _sfx_step_end != 0:
+        _sfx_step_end = 0
+        try:
+            buzzer.duty(0)
+        except Exception:
+            pass
 
 def draw_gun_hud(ammo, hp, state, max_ammo=8):
     oled.fill(0)
@@ -83,6 +146,7 @@ def main():
     need_redraw = True
 
     set_rgb(0, 10, 20)
+    set_board_leds(0, 0, 1)
     draw_gun_hud(ammo, hp, state, max_ammo)
 
     while True:
@@ -98,11 +162,15 @@ def main():
             if stable_a == 0:
                 sys.stdout.write("FIRE_DOWN\n")
                 if ammo > 0 and state not in ("RELOAD", "OVER"):
-                    set_rgb(80, 35, 0)
+                    set_rgb(180, 95, 15)
+                    set_board_leds(0, 1, 0)
+                    play_sfx("fire")
                     rgb_clear_ms = time.ticks_add(now, 70)
                 else:
-                    set_rgb(30, 0, 0)
-                    rgb_clear_ms = time.ticks_add(now, 70)
+                    set_rgb(60, 0, 0)
+                    set_board_leds(1, 0, 0)
+                    play_sfx("empty")
+                    rgb_clear_ms = time.ticks_add(now, 80)
             else:
                 sys.stdout.write("FIRE_UP\n")
 
@@ -115,7 +183,9 @@ def main():
             stable_b = raw_b
             if stable_b == 0:
                 sys.stdout.write("RELOAD\n")
-                set_rgb(0, 20, 60)
+                set_rgb(0, 40, 120)
+                set_board_leds(0, 0, 1)
+                play_sfx("reload")
                 rgb_clear_ms = time.ticks_add(now, 300)
 
         # --- 3. 讀取電腦同步狀態 (S:ammo,hp,state,max_ammo) ---
@@ -132,17 +202,25 @@ def main():
                         new_state = parts[2] if len(parts) > 2 else "PLAY"
                         new_max = int(parts[3]) if len(parts) > 3 else max_ammo
 
-                        if new_state == "HIT" and new_hp < hp:
-                            set_rgb(100, 0, 0)
+                        if new_state == "HIT" and (new_hp < hp or state != "HIT"):
+                            set_rgb(160, 0, 0)
+                            set_board_leds(1, 0, 0)
+                            play_sfx("hit")
                             rgb_clear_ms = time.ticks_add(now, 220)
-                        elif new_state == "LVLUP":
-                            set_rgb(80, 70, 0)
+                        elif new_state == "LVLUP" and state != "LVLUP":
+                            set_rgb(120, 100, 0)
+                            set_board_leds(0, 1, 1)
+                            play_sfx("lvlup")
                             rgb_clear_ms = time.ticks_add(now, 400)
-                        elif new_state == "RELOAD":
-                            set_rgb(0, 30, 80)
+                        elif new_state == "RELOAD" and state != "RELOAD":
+                            set_rgb(0, 40, 120)
+                            set_board_leds(0, 0, 1)
+                            play_sfx("reload")
                             rgb_clear_ms = time.ticks_add(now, 300)
-                        elif new_state == "OVER":
+                        elif new_state == "OVER" and state != "OVER":
                             set_rgb(50, 0, 0)
+                            set_board_leds(1, 0, 0)
+                            play_sfx("over")
                             rgb_clear_ms = 0
 
                         if (new_ammo != ammo or new_hp != hp or
@@ -158,13 +236,16 @@ def main():
                 if len(rx_buf) < 64:
                     rx_buf += ch
 
-        # --- 4. RGB 燈光計時歸位 ---
+        # --- 4. 非阻塞音效與 RGB 燈光計時歸位 ---
+        update_sfx(now)
         if rgb_clear_ms != 0 and time.ticks_diff(now, rgb_clear_ms) >= 0:
             rgb_clear_ms = 0
             if state == "OVER":
                 set_rgb(40, 0, 0)
+                set_board_leds(1, 0, 0)
             else:
                 set_rgb(0, 8, 12)
+                set_board_leds(0, 0, 0)
 
         # --- 5. 更新 OLED ---
         if need_redraw:
