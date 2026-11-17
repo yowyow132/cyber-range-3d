@@ -184,7 +184,7 @@
     </div>
   </div>
 
-  <script src="https://unpkg.com/peerjs@1.5.4/dist/peerjs.min.js"></script>
+  <script src="https://unpkg.com/mqtt@5.16.1/dist/mqtt.min.js"></script>
   <script>
     const wsBadge = document.getElementById('ws-badge');
     const toggleBtn = document.getElementById('toggle-gyro-btn');
@@ -287,10 +287,9 @@
       localStorage.setItem('gyro_inv_y', invY ? '1' : '0');
     });
 
-    // --- 1. 連線引擎（有 ?peer= 走 WebRTC P2P 直連，否則走本機 WebSocket 中繼）---
-    const targetPeerId = new URLSearchParams(location.search).get('peer');
-    let peerObj = null;
-    let peerConn = null;
+    // --- 1. 連線引擎（有 ?room= 走雲端 MQTT over WSS，否則走本機 WebSocket 中繼）---
+    const targetRoomId = new URLSearchParams(location.search).get('room') || new URLSearchParams(location.search).get('peer');
+    let mqttClient = null;
 
     function handleIncomingSync(raw) {
       const lines = String(raw || '').split(/\r?\n/);
@@ -311,47 +310,50 @@
       }
     }
 
-    function connectPeer(peerId) {
-      if (typeof Peer === 'undefined') {
-        wsBadge.textContent = 'PeerJS 載入失敗';
+    function connectMqtt(roomId) {
+      if (typeof mqtt === 'undefined') {
+        wsBadge.textContent = 'MQTT 載入失敗';
         return;
       }
-      wsBadge.textContent = 'P2P 配對中...';
+      wsBadge.textContent = '雲端配對中...';
       wsBadge.classList.remove('ok');
 
-      peerObj = new Peer({
-        config: {
-          iceServers: [
-            { urls: 'stun:stun.l.google.com:19302' },
-            { urls: 'stun:stun1.l.google.com:19302' },
-            { urls: 'stun:stun.cloudflare.com:3478' }
-          ]
+      mqttClient = mqtt.connect('wss://broker.emqx.io:8084/mqtt', {
+        clientId: 'ph_' + roomId + '_' + Math.random().toString(36).slice(2, 6),
+        clean: true,
+        connectTimeout: 8000,
+        reconnectPeriod: 1500,
+        will: {
+          topic: `cyberrange3d/${roomId}/tx`,
+          payload: 'GYRO_STATUS:disconnected:0\n',
+          qos: 0,
+          retain: false
         }
       });
 
-      function openDataConn() {
-        if (!peerObj || peerObj.destroyed) return;
-        const conn = peerObj.connect(peerId, { reliable: true });
-        peerConn = conn;
-        conn.on('open', () => {
-          wsBadge.textContent = 'P2P 直連電腦';
-          wsBadge.classList.add('ok');
-        });
-        conn.on('data', handleIncomingSync);
-        conn.on('close', () => {
-          wsBadge.textContent = 'P2P 重連中...';
-          wsBadge.classList.remove('ok');
-          setTimeout(openDataConn, 1500);
-        });
-        conn.on('error', () => {
-          wsBadge.textContent = 'P2P 連線失敗';
-          wsBadge.classList.remove('ok');
-        });
-      }
+      mqttClient.on('connect', () => {
+        mqttClient.subscribe(`cyberrange3d/${roomId}/rx`);
+        mqttClient.publish(`cyberrange3d/${roomId}/tx`, 'GYRO_STATUS:connected:1\n');
+        wsBadge.textContent = '已連線電腦';
+        wsBadge.classList.add('ok');
+      });
 
-      peerObj.on('open', openDataConn);
-      peerObj.on('error', (err) => {
-        wsBadge.textContent = '配對失敗: ' + (err.type || 'err');
+      mqttClient.on('message', (topic, payload) => {
+        handleIncomingSync(payload ? payload.toString() : '');
+      });
+
+      mqttClient.on('reconnect', () => {
+        wsBadge.textContent = '重連中...';
+        wsBadge.classList.remove('ok');
+      });
+
+      mqttClient.on('offline', () => {
+        wsBadge.textContent = '連線中斷';
+        wsBadge.classList.remove('ok');
+      });
+
+      mqttClient.on('error', () => {
+        wsBadge.textContent = '連線重試中';
         wsBadge.classList.remove('ok');
       });
     }
@@ -377,16 +379,16 @@
       };
     }
 
-    if (targetPeerId) {
-      connectPeer(targetPeerId);
+    if (targetRoomId) {
+      connectMqtt(targetRoomId);
     } else {
       connectWS();
     }
 
     function sendCmd(msg) {
       const payload = msg.endsWith('\n') ? msg : (msg + '\n');
-      if (peerConn && peerConn.open) {
-        try { peerConn.send(payload); } catch (e) {}
+      if (targetRoomId && mqttClient && mqttClient.connected) {
+        try { mqttClient.publish(`cyberrange3d/${targetRoomId}/tx`, payload); } catch (e) {}
       } else if (ws && ws.readyState === 1) {
         ws.send(payload);
       }
@@ -641,17 +643,21 @@
       );
     }
 
-    // 60Hz 平滑節流送出 AIM:dx,dy（含偏轉邊緣自動續轉）
+    // 平滑節流送出 AIM:dx,dy（含偏轉邊緣自動續轉）
+    let lastAimSendMs = 0;
     function tickSendLoop() {
-      if (gyroActive && calStage === 0 && !isClutchHeld) {
+      const now = performance.now();
+      const minInterval = targetRoomId ? 24 : 0;
+      if (gyroActive && calStage === 0 && !isClutchHeld && (now - lastAimSendMs >= minInterval)) {
         let edgeDx = 0;
         if (edgeTurnEnabled && Math.abs(virtualYaw) > 20) {
           const excess = Math.min(35, Math.abs(virtualYaw) - 20);
-          edgeDx = Math.sign(virtualYaw) * excess * 0.14;
+          edgeDx = Math.sign(virtualYaw) * excess * (targetRoomId ? 0.21 : 0.14);
         }
         const totalDx = pendingDx + edgeDx;
         const totalDy = pendingDy;
         if (Math.abs(totalDx) > 0.005 || Math.abs(totalDy) > 0.005) {
+          lastAimSendMs = now;
           pendingDx = 0;
           pendingDy = 0;
           sendCmd(`AIM:${totalDx.toFixed(3)},${totalDy.toFixed(3)}`);
@@ -659,7 +665,6 @@
           pktCount++;
         }
       }
-      const now = performance.now();
       if (now - lastRateTs >= 1000) {
         telRateEl.textContent = `${pktCount} Hz`;
         pktCount = 0;

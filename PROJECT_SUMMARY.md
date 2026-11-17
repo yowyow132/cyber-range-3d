@@ -42,8 +42,8 @@
 
 ### 3. 手機無線陀螺儀與體感中繼（`server.py`、`gyro.html`、`index.html`）
 - **免買外接感測器方案**：電腦接 USB ESP32 負責實體開槍/換彈/聲光，手機綁在槍上作為無線 6 軸陀螺儀與體感器，透過 Wi-Fi 或 5G 傳回電腦遊戲。
-- **GitHub Pages 免開伺服器 QR Code 直連（WebRTC / PeerJS）**：
-  - 電腦端點選「`📱 掃碼連手機陀螺儀`」自動產生配對 **QR Code**，手機相機掃描即可透過 WebRTC P2P 直連（無需啟動 `server.py` 或 `cloudflared`）。
+- **GitHub Pages 免開伺服器 QR Code 雲端連線（MQTT over WSS）**：
+  - 電腦端點選「`📱 掃碼連手機陀螺儀`」自動產生配對 **QR Code**，手機相機掃描即可透過 `wss://broker.emqx.io:8084/mqtt` 跨網段連線（穿透學校防火牆與 5G 網路，無需啟動 `server.py` 或 `cloudflared`）。
 - **`server.py` 雙協議本機中繼伺服器（離線／嚴格防火牆備援）**：
   - Port `8088`（HTTP + WS）：電腦開啟 `http://localhost:8088/` 玩遊戲並連接 USB ESP32。
   - Port `8443`（HTTPS + WSS）：自動產生 `.certs/` 自簽憑證供同區網手機開啟 `https://<區網IP>:8443/gyro.html`；若電腦與手機不在同區網（如學校電腦＋手機 5G），可搭配 `cloudflared tunnel --url http://127.0.0.1:8088` 取得公網 HTTPS/WSS 通道。

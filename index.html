@@ -663,7 +663,7 @@
 
   <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/loaders/GLTFLoader.js"></script>
-  <script src="https://unpkg.com/peerjs@1.5.4/dist/peerjs.min.js"></script>
+  <script src="https://unpkg.com/mqtt@5.16.1/dist/mqtt.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/qrcode-generator@1.4.4/qrcode.min.js"></script>
   <script src="world-art.js"></script>
   <script src="roguelite-data.js"></script>
@@ -1109,9 +1109,9 @@
     let isWifiConnected = false;
     let gyroSocket = null;
     let gyroWsConnected = false;
-    let gyroPeer = null;
-    let gyroPeerId = null;
-    let gyroPeerConn = null;
+    let gyroMqttClient = null;
+    let gyroRoomId = null;
+    let gyroMqttPeerAlive = false;
     let isPhoneGyroConnected = false;
     let espMoveX = 0;
     let espMoveY = 0;
@@ -1125,7 +1125,7 @@
     }
 
     function updatePhoneGyroUI() {
-      isPhoneGyroConnected = gyroWsConnected || Boolean(gyroPeerConn && gyroPeerConn.open);
+      isPhoneGyroConnected = gyroWsConnected || gyroMqttPeerAlive;
       if (isPhoneGyroConnected) {
         gyroBtn.textContent = '📱 手機陀螺儀 ✅ 已連線';
         gyroBtn.style.background = 'rgba(0, 255, 204, 0.22)';
@@ -1146,8 +1146,8 @@
       const hasSerial = isEspConnected && serialWriter;
       const hasWifi = isWifiConnected && wifiSocket && wifiSocket.readyState === 1;
       const hasGyroWs = gyroWsConnected && gyroSocket && gyroSocket.readyState === 1;
-      const hasGyroPeer = gyroPeerConn && gyroPeerConn.open;
-      if (!hasSerial && !hasWifi && !hasGyroWs && !hasGyroPeer) return;
+      const hasGyroMqtt = gyroMqttPeerAlive && gyroMqttClient && gyroMqttClient.connected && gyroRoomId;
+      if (!hasSerial && !hasWifi && !hasGyroWs && !hasGyroMqtt) return;
       const state = stateOverride || (isGameOver ? 'OVER' : (isReloading ? 'RELOAD' : 'PLAY'));
       const hpPct = Math.round((Math.max(0, build.hp) / build.maxHp) * 100);
       const msg = `S:${build.ammo},${hpPct},${state},${build.maxAmmo}\n`;
@@ -1157,8 +1157,8 @@
       if (hasGyroWs) {
         try { gyroSocket.send(msg); } catch (e) {}
       }
-      if (hasGyroPeer) {
-        try { gyroPeerConn.send(msg); } catch (e) {}
+      if (hasGyroMqtt) {
+        try { gyroMqttClient.publish(`cyberrange3d/${gyroRoomId}/rx`, msg); } catch (e) {}
       }
       if (hasSerial) {
         try { await serialWriter.write(new TextEncoder().encode(msg)); } catch (e) {}
@@ -1258,79 +1258,77 @@
       }
     }
 
-    async function buildGyroPairUrl(peerId) {
+    function buildGyroPairUrl(roomId) {
       if (location.protocol === 'https:' && location.host) {
         const u = new URL('gyro.html', location.href);
-        u.searchParams.set('peer', peerId);
+        u.searchParams.set('room', roomId);
         return u.toString();
       }
-      // 本機開發時優先向 server.py 取得區網 HTTPS 網址，沒有則用公開 GitHub Pages
-      try {
-        const apiUrl = location.host ? '/api/info' : 'http://127.0.0.1:8088/api/info';
-        const res = await fetch(apiUrl);
-        if (res.ok) {
-          const info = await res.json();
-          if (info.gyro_urls && info.gyro_urls[0]) {
-            return `${info.gyro_urls[0]}?peer=${encodeURIComponent(peerId)}`;
-          }
-        }
-      } catch (e) {}
-      return `https://yowyow132.github.io/cyber-range-3d/gyro.html?peer=${encodeURIComponent(peerId)}`;
+      return `https://yowyow132.github.io/cyber-range-3d/gyro.html?room=${encodeURIComponent(roomId)}`;
     }
 
-    function ensureGyroPeerHost() {
-      if (gyroPeer && !gyroPeer.destroyed) return;
-      if (typeof Peer === 'undefined') {
-        gyroQrStatus.textContent = '❌ 無法載入 PeerJS（請確認網路連線）';
+    function ensureGyroMqttHost() {
+      if (!gyroRoomId) {
+        gyroRoomId = 'cr3d-' + Math.random().toString(36).slice(2, 8);
+      }
+      const url = buildGyroPairUrl(gyroRoomId);
+      renderQrForUrl(url);
+
+      if (gyroMqttClient) return;
+      if (typeof mqtt === 'undefined') {
+        gyroQrStatus.textContent = '❌ 無法載入 MQTT 連線模組（請確認網路連線）';
         gyroQrStatus.style.color = '#f87171';
         return;
       }
-      gyroPeerId = 'cr3d-' + Math.random().toString(36).slice(2, 8);
-      const peer = new Peer(gyroPeerId, {
-        config: {
-          iceServers: [
-            { urls: 'stun:stun.l.google.com:19302' },
-            { urls: 'stun:stun1.l.google.com:19302' },
-            { urls: 'stun:stun.cloudflare.com:3478' }
-          ]
+
+      gyroQrStatus.textContent = '⏳ 正在連接雲端轉發通道...';
+      gyroQrStatus.style.color = '#facc15';
+
+      const client = mqtt.connect('wss://broker.emqx.io:8084/mqtt', {
+        clientId: 'pc_' + gyroRoomId + '_' + Math.random().toString(36).slice(2, 6),
+        clean: true,
+        connectTimeout: 8000,
+        reconnectPeriod: 2000,
+      });
+      gyroMqttClient = client;
+
+      client.on('connect', () => {
+        client.subscribe(`cyberrange3d/${gyroRoomId}/tx`, (err) => {
+          if (!err && !gyroMqttPeerAlive) {
+            gyroQrStatus.textContent = '⏳ 請用手機掃描上方 QR Code 配對...';
+            gyroQrStatus.style.color = '#facc15';
+          }
+        });
+      });
+
+      client.on('message', (topic, payload) => {
+        const text = payload ? payload.toString() : '';
+        const lines = text.split(/\r?\n/);
+        for (const raw of lines) {
+          const cmd = raw.trim();
+          if (!cmd) continue;
+          if (cmd.startsWith('GYRO_STATUS:')) {
+            const alive = cmd.includes(':connected:');
+            const wasAlive = gyroMqttPeerAlive;
+            gyroMqttPeerAlive = alive;
+            updatePhoneGyroUI();
+            if (alive && !wasAlive) {
+              gyroQrStatus.textContent = '✅ 手機陀螺儀已成功連線！';
+              gyroQrStatus.style.color = '#34d399';
+              setTimeout(() => { gyroQrModal.style.display = 'none'; }, 700);
+            }
+          } else {
+            if (!gyroMqttPeerAlive) {
+              gyroMqttPeerAlive = true;
+              updatePhoneGyroUI();
+            }
+            handleEspCommand(cmd);
+          }
         }
       });
-      gyroPeer = peer;
 
-      peer.on('open', async (id) => {
-        const url = await buildGyroPairUrl(id);
-        renderQrForUrl(url);
-        gyroQrStatus.textContent = '⏳ 請用手機掃描上方 QR Code 配對...';
-        gyroQrStatus.style.color = '#facc15';
-      });
-
-      peer.on('connection', (conn) => {
-        if (gyroPeerConn && gyroPeerConn !== conn) {
-          try { gyroPeerConn.close(); } catch (e) {}
-        }
-        gyroPeerConn = conn;
-        conn.on('open', () => {
-          updatePhoneGyroUI();
-          gyroQrStatus.textContent = '✅ 手機陀螺儀已成功連線！';
-          gyroQrStatus.style.color = '#34d399';
-          setTimeout(() => { gyroQrModal.style.display = 'none'; }, 750);
-        });
-        conn.on('data', (data) => {
-          const lines = String(data || '').split(/\r?\n/);
-          for (const raw of lines) handleEspCommand(raw);
-        });
-        conn.on('close', () => {
-          if (gyroPeerConn === conn) gyroPeerConn = null;
-          updatePhoneGyroUI();
-        });
-        conn.on('error', () => {
-          if (gyroPeerConn === conn) gyroPeerConn = null;
-          updatePhoneGyroUI();
-        });
-      });
-
-      peer.on('error', (err) => {
-        gyroQrStatus.textContent = '⚠️ 配對連線異常：' + (err.type || err.message || err);
+      client.on('error', (err) => {
+        gyroQrStatus.textContent = '⚠️ 雲端連線重試中：' + (err.message || err);
         gyroQrStatus.style.color = '#f87171';
       });
     }
@@ -1339,23 +1337,15 @@
       gyroQrModal.style.display = 'none';
     });
 
-    gyroBtn.addEventListener('click', async () => {
+    gyroBtn.addEventListener('click', () => {
       gyroQrModal.style.display = 'flex';
-      if (gyroPeer && gyroPeer.open && gyroPeerId) {
-        const url = await buildGyroPairUrl(gyroPeerId);
-        renderQrForUrl(url);
-        if (gyroPeerConn && gyroPeerConn.open) {
-          gyroQrStatus.textContent = '✅ 手機陀螺儀已連線！';
-          gyroQrStatus.style.color = '#34d399';
-        } else {
-          gyroQrStatus.textContent = '⏳ 請用手機掃描上方 QR Code 配對...';
-          gyroQrStatus.style.color = '#facc15';
-        }
-      } else {
-        gyroQrBox.innerHTML = '';
-        gyroQrStatus.textContent = '⏳ 正在產生配對碼...';
+      ensureGyroMqttHost();
+      if (gyroMqttPeerAlive) {
+        gyroQrStatus.textContent = '✅ 手機陀螺儀已連線！';
+        gyroQrStatus.style.color = '#34d399';
+      } else if (gyroMqttClient && gyroMqttClient.connected) {
+        gyroQrStatus.textContent = '⏳ 請用手機掃描上方 QR Code 配對...';
         gyroQrStatus.style.color = '#facc15';
-        ensureGyroPeerHost();
       }
     });
 
