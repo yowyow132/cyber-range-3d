@@ -92,8 +92,17 @@ relay.value(0)  # 開機時預設關閉
 # === OLED 螢幕（1.3 吋，128x64 像素）===
 # I2C 是一種通訊方式，用兩條線（SDA 資料線、SCL 時鐘線）跟螢幕溝通
 
-i2c = SoftI2C(sda=Pin(21), scl=Pin(22))
-oled = ssd1306.SSD1306_I2C(128, 64, i2c)
+time.sleep_ms(120)
+i2c = SoftI2C(sda=Pin(21), scl=Pin(22), freq=100000)
+oled = None
+for _attempt in range(3):
+    try:
+        oled = ssd1306.SSD1306_I2C(128, 64, i2c)
+        break
+    except OSError:
+        time.sleep_ms(80)
+if oled is None:
+    oled = ssd1306.SSD1306_I2C(128, 64, i2c)
 
 
 # ============================================

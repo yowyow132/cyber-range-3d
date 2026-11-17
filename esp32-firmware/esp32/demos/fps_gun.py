@@ -123,7 +123,12 @@ def draw_gun_hud(ammo, hp, state, max_ammo=8):
 
     oled.text("HP: {:3d}%".format(max(0, hp)), 0, 41, 1)
     draw_progress_bar(0, 52, 128, 10, max(0, min(100, hp)))
-    oled.show()
+    for _ in range(2):
+        try:
+            oled.show()
+            break
+        except OSError:
+            time.sleep_ms(20)
 
 def main():
     ammo = 8
