@@ -2,7 +2,7 @@
 <html lang="zh-TW">
 <head>
   <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
   <title>CYBER RANGE 3D: ROGUELITE - ESP32 肉鴿槍戰</title>
   <style>
     * { box-sizing: border-box; user-select: none; }
@@ -410,6 +410,98 @@
       white-space: nowrap;
     }
     #event-banner.hidden { display: none; }
+
+    /* ==========================================
+       手機專屬觸控與橫屏響應式 UI（僅 body.mobile-mode 生效，電腦版完全隱藏）
+       ========================================== */
+    #mobile-controls, #mobile-tip { display: none !important; }
+    body.mobile-mode #mobile-tip {
+      display: block !important;
+      font-size: 12px; color: #7dd3fc; background: rgba(15, 23, 42, 0.78);
+      border: 1px solid rgba(56, 189, 248, 0.35); border-radius: 10px;
+      padding: 7px 12px; margin-bottom: 12px; max-width: 680px; line-height: 1.45;
+    }
+    body.mobile-mode .controls-info { display: none; }
+    body.mobile-mode #overlay {
+      justify-content: flex-start; overflow-y: auto; padding: 14px 16px 24px;
+    }
+    body.mobile-mode h1 { font-size: 26px; margin-bottom: 4px; }
+    body.mobile-mode .subtitle { font-size: 12px; margin-bottom: 10px; }
+    body.mobile-mode #loadout-picker {
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 8px; margin-bottom: 12px; max-width: 100%;
+    }
+    body.mobile-mode .loadout-card { padding: 8px 10px; border-radius: 10px; }
+    body.mobile-mode .loadout-card .l-title { font-size: 13px; }
+    body.mobile-mode .loadout-card .l-desc { font-size: 11px; line-height: 1.3; }
+    body.mobile-mode .settings-bar { gap: 10px; padding: 6px 12px; margin-bottom: 10px; font-size: 12px; }
+    body.mobile-mode button { padding: 9px 16px; font-size: 13px; }
+    body.mobile-mode #hud { padding: 8px 12px; }
+    body.mobile-mode .stat-box { padding: 6px 10px; }
+    body.mobile-mode .score-val { font-size: 16px; }
+    body.mobile-mode .wave-val, body.mobile-mode .extra-val { font-size: 11px; }
+    body.mobile-mode .hp-container { width: 175px; }
+    body.mobile-mode .ammo-box { min-width: 140px; }
+    body.mobile-mode .ammo-val { font-size: 26px; }
+    body.mobile-mode #minimap { width: 88px !important; height: 88px !important; }
+
+    body.mobile-mode.playing-active #mobile-controls {
+      display: block !important;
+      position: fixed; inset: 0;
+      z-index: 14; pointer-events: none;
+      touch-action: none;
+    }
+    #mob-aim-pad {
+      position: absolute; left: 36%; right: 0; top: 52px; bottom: 0;
+      pointer-events: auto; touch-action: none;
+    }
+    #mob-joy {
+      position: absolute; left: 18px; bottom: 118px;
+      width: 112px; height: 112px; border-radius: 50%;
+      background: rgba(15, 23, 42, 0.45);
+      border: 2px solid rgba(0, 255, 204, 0.55);
+      box-shadow: 0 0 16px rgba(0, 255, 204, 0.22);
+      pointer-events: auto; touch-action: none;
+    }
+    #mob-joy-knob {
+      position: absolute; left: 50%; top: 50%;
+      width: 44px; height: 44px; margin: -22px 0 0 -22px;
+      border-radius: 50%;
+      background: rgba(0, 255, 204, 0.72);
+      border: 2px solid #ffffff;
+      box-shadow: 0 0 12px #00ffcc;
+      pointer-events: none;
+    }
+    .mob-btn {
+      position: absolute; pointer-events: auto; touch-action: none;
+      display: flex; align-items: center; justify-content: center;
+      border-radius: 50%; font-weight: 800; color: #f8fafc;
+      backdrop-filter: blur(4px);
+    }
+    #mob-fire {
+      right: 20px; bottom: 122px; width: 74px; height: 74px; font-size: 14px;
+      background: rgba(255, 31, 90, 0.45); border: 2px solid #ff4d79;
+      box-shadow: 0 0 18px rgba(255, 31, 90, 0.45);
+    }
+    #mob-fire.active { background: rgba(255, 31, 90, 0.8); transform: scale(0.94); }
+    #mob-jump {
+      right: 106px; bottom: 114px; width: 52px; height: 52px; font-size: 12px;
+      background: rgba(0, 255, 204, 0.32); border: 1.5px solid #00ffcc;
+    }
+    #mob-dash {
+      right: 98px; bottom: 176px; width: 52px; height: 52px; font-size: 12px;
+      background: rgba(56, 189, 248, 0.34); border: 1.5px solid #38bdf8;
+    }
+    #mob-reload {
+      right: 26px; bottom: 206px; width: 48px; height: 48px; font-size: 12px;
+      background: rgba(250, 204, 21, 0.32); border: 1.5px solid #facc15;
+    }
+    #mob-pause {
+      right: 12px; top: 8px; padding: 6px 12px; border-radius: 8px;
+      font-size: 12px; font-weight: bold; color: #f8fafc;
+      background: rgba(15, 23, 42, 0.82); border: 1px solid rgba(148, 163, 184, 0.5);
+      pointer-events: auto; position: absolute;
+    }
   </style>
 </head>
 <body>
@@ -510,12 +602,24 @@
     <p>轉動準心瞄準前方 3D 增幅卡牌，<b>直接開槍射擊</b>即可裝備！</p>
   </div>
 
+  <!-- 手機專屬虛擬操作層（預設完全隱藏，僅手機觸控裝置於遊戲中顯示） -->
+  <div id="mobile-controls">
+    <div id="mob-aim-pad"></div>
+    <div id="mob-joy"><div id="mob-joy-knob"></div></div>
+    <div id="mob-fire" class="mob-btn">🔫<br>開火</div>
+    <div id="mob-jump" class="mob-btn">跳躍</div>
+    <div id="mob-dash" class="mob-btn">衝刺</div>
+    <div id="mob-reload" class="mob-btn">換彈</div>
+    <div id="mob-pause">⏸️ 暫停</div>
+  </div>
+
   <!-- 開始 / 暫停 / Game Over -->
   <div id="overlay">
     <h1 id="overlay-title">CYBER RANGE 3D</h1>
     <div class="subtitle" id="overlay-sub">
       賽博肉鴿科幻射擊 — 選擇開局武器流派，善用<b>彈射跳台空戰</b>、引爆<b>連鎖能量桶</b>並搶奪<b>戰場空投事件</b>！
     </div>
+    <div id="mobile-tip">📱 手機觸控模式已自動啟用：左拇指移動｜右半螢幕滑動轉視角｜可搭配 ESP32 Wi-Fi 無線扣板機</div>
     <div id="loadout-picker"></div>
     <div id="pause-build-panel" class="hidden"></div>
     <div class="controls-info" id="controls-info">
@@ -2347,6 +2451,10 @@
       if (keys['KeyS']) dir.sub(forward);
       if (keys['KeyA']) dir.sub(right);
       if (keys['KeyD']) dir.add(right);
+      if (espMoveY !== 0) dir.addScaledVector(forward, espMoveY);
+      if (espMoveX !== 0) dir.addScaledVector(right, espMoveX);
+      if (mobileMoveY !== 0) dir.addScaledVector(forward, mobileMoveY);
+      if (mobileMoveX !== 0) dir.addScaledVector(right, mobileMoveX);
       if (dir.lengthSq() === 0) dir.copy(forward);
       dir.normalize();
 
@@ -2404,6 +2512,18 @@
       });
     }
 
+    // 嚴格僅在手機 / 粗觸控裝置啟用觸控層（桌機版完全不出現）
+    const isMobileDevice = (() => {
+      const coarse = !!(window.matchMedia && window.matchMedia('(pointer: coarse)').matches);
+      const mobileUA = /Android|iPhone|iPad|iPod|Mobile/i.test(navigator.userAgent || '');
+      return coarse || mobileUA;
+    })();
+    if (isMobileDevice) {
+      document.body.classList.add('mobile-mode');
+    }
+
+    let mobileMoveX = 0;
+    let mobileMoveY = 0;
     let isPointerLocked = false;
     let hadPointerLockThisRun = false;
     let pointerLockFallbackNotified = false;
@@ -2411,11 +2531,166 @@
     let lastFallbackX = null;
     let lastFallbackY = null;
 
+    function resetTouchInputs() {
+      mobileMoveX = 0;
+      mobileMoveY = 0;
+      const knob = document.getElementById('mob-joy-knob');
+      if (knob) knob.style.transform = 'translate(0px, 0px)';
+      const fireBtn = document.getElementById('mob-fire');
+      if (fireBtn) fireBtn.classList.remove('active');
+    }
+
+    if (isMobileDevice) {
+      const mobJoy = document.getElementById('mob-joy');
+      const mobJoyKnob = document.getElementById('mob-joy-knob');
+      const mobAimPad = document.getElementById('mob-aim-pad');
+      const mobFireBtn = document.getElementById('mob-fire');
+      const mobJumpBtn = document.getElementById('mob-jump');
+      const mobDashBtn = document.getElementById('mob-dash');
+      const mobReloadBtn = document.getElementById('mob-reload');
+      const mobPauseBtn = document.getElementById('mob-pause');
+
+      let joyTouchId = null;
+      let aimTouchId = null;
+      let aimLastX = 0;
+      let aimLastY = 0;
+
+      const updateJoyFromTouch = (t) => {
+        if (!mobJoy) return;
+        const rect = mobJoy.getBoundingClientRect();
+        const cx = rect.left + rect.width / 2;
+        const cy = rect.top + rect.height / 2;
+        const maxR = Math.max(24, rect.width * 0.42);
+        let dx = t.clientX - cx;
+        let dy = t.clientY - cy;
+        const d = Math.hypot(dx, dy);
+        if (d > maxR) {
+          dx = (dx / d) * maxR;
+          dy = (dy / d) * maxR;
+        }
+        mobileMoveX = Math.max(-1, Math.min(1, dx / maxR));
+        mobileMoveY = Math.max(-1, Math.min(1, -dy / maxR));
+        if (mobJoyKnob) mobJoyKnob.style.transform = `translate(${dx.toFixed(1)}px, ${dy.toFixed(1)}px)`;
+      };
+
+      if (mobJoy) {
+        mobJoy.addEventListener('touchstart', (e) => {
+          e.preventDefault();
+          if (joyTouchId === null && e.changedTouches.length > 0) {
+            const t = e.changedTouches[0];
+            joyTouchId = t.identifier;
+            updateJoyFromTouch(t);
+          }
+        }, { passive: false });
+        mobJoy.addEventListener('touchmove', (e) => {
+          e.preventDefault();
+          for (let i = 0; i < e.changedTouches.length; i++) {
+            if (e.changedTouches[i].identifier === joyTouchId) {
+              updateJoyFromTouch(e.changedTouches[i]);
+            }
+          }
+        }, { passive: false });
+        const endJoy = (e) => {
+          for (let i = 0; i < e.changedTouches.length; i++) {
+            if (e.changedTouches[i].identifier === joyTouchId) {
+              joyTouchId = null;
+              mobileMoveX = 0;
+              mobileMoveY = 0;
+              if (mobJoyKnob) mobJoyKnob.style.transform = 'translate(0px, 0px)';
+            }
+          }
+        };
+        mobJoy.addEventListener('touchend', endJoy);
+        mobJoy.addEventListener('touchcancel', endJoy);
+      }
+
+      if (mobAimPad) {
+        mobAimPad.addEventListener('touchstart', (e) => {
+          e.preventDefault();
+          if (aimTouchId === null && e.changedTouches.length > 0) {
+            const t = e.changedTouches[0];
+            aimTouchId = t.identifier;
+            aimLastX = t.clientX;
+            aimLastY = t.clientY;
+          }
+        }, { passive: false });
+        mobAimPad.addEventListener('touchmove', (e) => {
+          e.preventDefault();
+          if (!isPlaying) return;
+          for (let i = 0; i < e.changedTouches.length; i++) {
+            const t = e.changedTouches[i];
+            if (t.identifier === aimTouchId) {
+              const dx = t.clientX - aimLastX;
+              const dy = t.clientY - aimLastY;
+              aimLastX = t.clientX;
+              aimLastY = t.clientY;
+              const touchSens = mouseSensitivity * 1.45;
+              camera.rotation.y -= dx * touchSens;
+              camera.rotation.x -= dy * touchSens;
+              camera.rotation.x = Math.max(-Math.PI / 2.2, Math.min(Math.PI / 2.2, camera.rotation.x));
+            }
+          }
+        }, { passive: false });
+        const endAim = (e) => {
+          for (let i = 0; i < e.changedTouches.length; i++) {
+            if (e.changedTouches[i].identifier === aimTouchId) aimTouchId = null;
+          }
+        };
+        mobAimPad.addEventListener('touchend', endAim);
+        mobAimPad.addEventListener('touchcancel', endAim);
+      }
+
+      if (mobFireBtn) {
+        mobFireBtn.addEventListener('touchstart', (e) => {
+          e.preventDefault();
+          if (!isPlaying) return;
+          isMouseDown = true;
+          mobFireBtn.classList.add('active');
+          fireGun();
+        }, { passive: false });
+        const endFire = (e) => {
+          e.preventDefault();
+          isMouseDown = false;
+          if (!isEspFireHeld) requireTriggerRelease = false;
+          mobFireBtn.classList.remove('active');
+        };
+        mobFireBtn.addEventListener('touchend', endFire, { passive: false });
+        mobFireBtn.addEventListener('touchcancel', endFire, { passive: false });
+      }
+      if (mobJumpBtn) {
+        mobJumpBtn.addEventListener('touchstart', (e) => {
+          e.preventDefault();
+          if (isPlaying && !isLevelUpOpen && isGrounded) {
+            playerVy = 7.2; isGrounded = false; playJumpSound();
+          }
+        }, { passive: false });
+      }
+      if (mobDashBtn) {
+        mobDashBtn.addEventListener('touchstart', (e) => {
+          e.preventDefault();
+          if (isPlaying) performDash();
+        }, { passive: false });
+      }
+      if (mobReloadBtn) {
+        mobReloadBtn.addEventListener('touchstart', (e) => {
+          e.preventDefault();
+          if (isPlaying) reloadAmmo();
+        }, { passive: false });
+      }
+      if (mobPauseBtn) {
+        mobPauseBtn.addEventListener('touchstart', (e) => {
+          e.preventDefault();
+          if (isPlaying && !isGameOver) pauseGame();
+        }, { passive: false });
+      }
+    }
+
     function enterPlayMode() {
       isPlaying = true;
       lastFallbackX = null;
       lastFallbackY = null;
       overlay.classList.add('hidden');
+      document.body.classList.add('playing-active');
       if (bgmGain && audioCtx) applyMasterGain();
     }
 
@@ -2424,6 +2699,8 @@
       isMouseDown = false;
       lastFallbackX = null;
       lastFallbackY = null;
+      resetTouchInputs();
+      document.body.classList.remove('playing-active');
       for (const k in keys) keys[k] = false;
       if (!isGameOver && !isLevelUpOpen) {
         overlayTitle.textContent = isDemoMode ? '演示模式暫停' : '遊戲暫停';
@@ -2454,6 +2731,10 @@
       enterPlayMode();
       if (isDemoMode) {
         showBannerMsg('🎯 演示模式啟動：無敵狀態＋中央標靶假人（射擊掉經驗！）', '#facc15');
+      }
+      if (isMobileDevice) {
+        isPointerLocked = false;
+        return;
       }
       if (renderer.domElement && renderer.domElement.requestPointerLock) {
         try {
@@ -2974,9 +3255,11 @@
 
     function triggerGameOver() {
       isGameOver = true; isPlaying = false; isMouseDown = false; isEspFireHeld = false;
+      resetTouchInputs();
+      document.body.classList.remove('playing-active');
       speedLinesEl.classList.remove('active');
       clearBossHazards();
-      document.exitPointerLock();
+      if (document.pointerLockElement && document.exitPointerLock) document.exitPointerLock();
       const recRes = saveRunRecord(selectedLoadoutId, score, wave, kills);
       renderLoadoutPicker();
       if (loadoutPickerEl) loadoutPickerEl.style.display = '';
@@ -3311,6 +3594,8 @@
           if (keys['KeyD']) moveVec.add(right);
           if (espMoveY !== 0) moveVec.addScaledVector(forward, espMoveY);
           if (espMoveX !== 0) moveVec.addScaledVector(right, espMoveX);
+          if (mobileMoveY !== 0) moveVec.addScaledVector(forward, mobileMoveY);
+          if (mobileMoveX !== 0) moveVec.addScaledVector(right, mobileMoveX);
 
           if (moveVec.lengthSq() > 0) {
             const analogScale = (moveVec.lengthSq() > 1 || keys['KeyW'] || keys['KeyS'] || keys['KeyA'] || keys['KeyD'])
