@@ -287,9 +287,14 @@
       localStorage.setItem('gyro_inv_y', invY ? '1' : '0');
     });
 
-    // --- 1. 連線引擎（有 ?room= 走雲端 MQTT over WSS，否則走本機 WebSocket 中繼）---
+    // --- 1. 連線引擎（?room= 優先以 MQTT 握手升級 WebRTC P2P UDP 直連，並以 MQTT 作備援；無 ?room= 走本機 WebSocket）---
     const targetRoomId = new URLSearchParams(location.search).get('room') || new URLSearchParams(location.search).get('peer');
     let mqttClient = null;
+    let rtcPc = null;
+    let rtcAimDc = null;
+    let rtcCtrlDc = null;
+    let rtcConnected = false;
+    let rtcIceQueue = [];
 
     function handleIncomingSync(raw) {
       const lines = String(raw || '').split(/\r?\n/);
@@ -307,6 +312,16 @@
             hudStateEl.textContent = st;
           }
         }
+      }
+    }
+
+    function updateConnBadge(isMqttOk) {
+      if (rtcConnected) {
+        wsBadge.textContent = '⚡ P2P 直連 (極速)';
+        wsBadge.classList.add('ok');
+      } else if (isMqttOk) {
+        wsBadge.textContent = '已連線電腦 (中繼)';
+        wsBadge.classList.add('ok');
       }
     }
 
@@ -331,30 +346,120 @@
         }
       });
 
+      function closePhoneRtc() {
+        rtcConnected = false;
+        rtcIceQueue = [];
+        if (rtcAimDc) { try { rtcAimDc.close(); } catch (e) {} rtcAimDc = null; }
+        if (rtcCtrlDc) { try { rtcCtrlDc.close(); } catch (e) {} rtcCtrlDc = null; }
+        if (rtcPc) { try { rtcPc.close(); } catch (e) {} rtcPc = null; }
+      }
+
+      async function handleOfferFromPc(sdp) {
+        if (typeof RTCPeerConnection === 'undefined') return;
+        closePhoneRtc();
+        const pc = new RTCPeerConnection({
+          iceServers: [
+            { urls: ['stun:stun.l.google.com:19302', 'stun:stun1.l.google.com:19302'] }
+          ]
+        });
+        rtcPc = pc;
+
+        pc.ondatachannel = (ev) => {
+          const dc = ev.channel;
+          if (dc.label === 'aim') rtcAimDc = dc;
+          else if (dc.label === 'ctrl') rtcCtrlDc = dc;
+
+          dc.onopen = () => {
+            if (dc.label === 'aim') {
+              rtcConnected = true;
+              updateConnBadge(true);
+            }
+          };
+          dc.onclose = () => {
+            if (dc.label === 'aim') {
+              rtcConnected = false;
+              updateConnBadge(!!(mqttClient && mqttClient.connected));
+            }
+          };
+          dc.onmessage = (msgEv) => handleIncomingSync(msgEv.data);
+        };
+
+        pc.onicecandidate = (ev) => {
+          if (ev.candidate && mqttClient && mqttClient.connected) {
+            mqttClient.publish(`cyberrange3d/${roomId}/sig_ph`, JSON.stringify({
+              type: 'ice',
+              candidate: ev.candidate
+            }));
+          }
+        };
+
+        pc.onconnectionstatechange = () => {
+          if (pc.connectionState === 'failed' || pc.connectionState === 'closed') {
+            rtcConnected = false;
+            updateConnBadge(!!(mqttClient && mqttClient.connected));
+          }
+        };
+
+        await pc.setRemoteDescription(new RTCSessionDescription(sdp));
+        while (rtcIceQueue.length > 0) {
+          const c = rtcIceQueue.shift();
+          try { await pc.addIceCandidate(new RTCIceCandidate(c)); } catch (e) {}
+        }
+        const answer = await pc.createAnswer();
+        await pc.setLocalDescription(answer);
+        mqttClient.publish(`cyberrange3d/${roomId}/sig_ph`, JSON.stringify({
+          type: 'answer',
+          sdp: pc.localDescription
+        }));
+      }
+
       mqttClient.on('connect', () => {
         mqttClient.subscribe(`cyberrange3d/${roomId}/rx`);
+        mqttClient.subscribe(`cyberrange3d/${roomId}/sig_pc`);
         mqttClient.publish(`cyberrange3d/${roomId}/tx`, 'GYRO_STATUS:connected:1\n');
-        wsBadge.textContent = '已連線電腦';
-        wsBadge.classList.add('ok');
+        mqttClient.publish(`cyberrange3d/${roomId}/sig_ph`, JSON.stringify({ type: 'hello' }));
+        updateConnBadge(true);
       });
 
-      mqttClient.on('message', (topic, payload) => {
-        handleIncomingSync(payload ? payload.toString() : '');
+      mqttClient.on('message', async (topic, payload) => {
+        const text = payload ? payload.toString() : '';
+        if (topic.endsWith('/sig_pc')) {
+          try {
+            const sig = JSON.parse(text);
+            if (sig.type === 'offer' && sig.sdp) {
+              await handleOfferFromPc(sig.sdp);
+            } else if (sig.type === 'ice' && sig.candidate) {
+              if (rtcPc && rtcPc.remoteDescription) {
+                try { await rtcPc.addIceCandidate(new RTCIceCandidate(sig.candidate)); } catch (e) {}
+              } else {
+                rtcIceQueue.push(sig.candidate);
+              }
+            }
+          } catch (e) {}
+          return;
+        }
+        handleIncomingSync(text);
       });
 
       mqttClient.on('reconnect', () => {
-        wsBadge.textContent = '重連中...';
-        wsBadge.classList.remove('ok');
+        if (!rtcConnected) {
+          wsBadge.textContent = '重連中...';
+          wsBadge.classList.remove('ok');
+        }
       });
 
       mqttClient.on('offline', () => {
-        wsBadge.textContent = '連線中斷';
-        wsBadge.classList.remove('ok');
+        if (!rtcConnected) {
+          wsBadge.textContent = '連線中斷';
+          wsBadge.classList.remove('ok');
+        }
       });
 
       mqttClient.on('error', () => {
-        wsBadge.textContent = '連線重試中';
-        wsBadge.classList.remove('ok');
+        if (!rtcConnected) {
+          wsBadge.textContent = '連線重試中';
+          wsBadge.classList.remove('ok');
+        }
       });
     }
 
@@ -387,6 +492,16 @@
 
     function sendCmd(msg) {
       const payload = msg.endsWith('\n') ? msg : (msg + '\n');
+      const isStream = msg.startsWith('AIM:') || msg.startsWith('MOVE:');
+      if (isStream && rtcAimDc && rtcAimDc.readyState === 'open') {
+        try { rtcAimDc.send(payload); return; } catch (e) {}
+      }
+      if (!isStream && rtcCtrlDc && rtcCtrlDc.readyState === 'open') {
+        try { rtcCtrlDc.send(payload); return; } catch (e) {}
+      }
+      if (rtcAimDc && rtcAimDc.readyState === 'open') {
+        try { rtcAimDc.send(payload); return; } catch (e) {}
+      }
       if (targetRoomId && mqttClient && mqttClient.connected) {
         try { mqttClient.publish(`cyberrange3d/${targetRoomId}/tx`, payload); } catch (e) {}
       } else if (ws && ws.readyState === 1) {
@@ -643,16 +758,21 @@
       );
     }
 
-    // 平滑節流送出 AIM:dx,dy（含偏轉邊緣自動續轉）
+    // 平滑節流送出 AIM:dx,dy（WebRTC P2P 開啟後解除節流全速 60~120Hz，並以 dt 校正邊緣續轉）
     let lastAimSendMs = 0;
+    let lastTickMs = performance.now();
     function tickSendLoop() {
       const now = performance.now();
-      const minInterval = targetRoomId ? 24 : 0;
+      const loopDt = Math.min(0.05, Math.max(0.004, (now - lastTickMs) / 1000));
+      lastTickMs = now;
+      const isFastP2p = !!(rtcAimDc && rtcAimDc.readyState === 'open');
+      const minInterval = (targetRoomId && !isFastP2p) ? 24 : 0;
       if (gyroActive && calStage === 0 && !isClutchHeld && (now - lastAimSendMs >= minInterval)) {
         let edgeDx = 0;
         if (edgeTurnEnabled && Math.abs(virtualYaw) > 20) {
           const excess = Math.min(35, Math.abs(virtualYaw) - 20);
-          edgeDx = Math.sign(virtualYaw) * excess * (targetRoomId ? 0.21 : 0.14);
+          const edgeStepDt = (targetRoomId && !isFastP2p) ? 0.024 : loopDt;
+          edgeDx = Math.sign(virtualYaw) * excess * 8.2 * edgeStepDt;
         }
         const totalDx = pendingDx + edgeDx;
         const totalDy = pendingDy;

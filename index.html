@@ -1112,6 +1112,13 @@
     let gyroMqttClient = null;
     let gyroRoomId = null;
     let gyroMqttPeerAlive = false;
+    let gyroRtcPc = null;
+    let gyroAimDc = null;
+    let gyroCtrlDc = null;
+    let gyroRtcConnected = false;
+    let gyroRemoteIceQueue = [];
+    let gyroYawBuffer = 0;
+    let gyroPitchBuffer = 0;
     let isPhoneGyroConnected = false;
     let espMoveX = 0;
     let espMoveY = 0;
@@ -1120,14 +1127,15 @@
       const parts = [];
       if (isWifiConnected) parts.push('Wi-Fi 無線槍控');
       else if (isEspConnected) parts.push('USB ESP32 槍控');
-      if (isPhoneGyroConnected) parts.push('手機陀螺儀');
+      if (gyroRtcConnected) parts.push('手機陀螺儀⚡P2P');
+      else if (isPhoneGyroConnected) parts.push('手機陀螺儀');
       espStatusEl.textContent = parts.length ? parts.join(' + ') : '滑鼠 + 鍵盤';
     }
 
     function updatePhoneGyroUI() {
-      isPhoneGyroConnected = gyroWsConnected || gyroMqttPeerAlive;
+      isPhoneGyroConnected = gyroWsConnected || gyroMqttPeerAlive || gyroRtcConnected;
       if (isPhoneGyroConnected) {
-        gyroBtn.textContent = '📱 手機陀螺儀 ✅ 已連線';
+        gyroBtn.textContent = gyroRtcConnected ? '📱 手機陀螺儀 ⚡ P2P直連' : '📱 手機陀螺儀 ✅ 中繼已連';
         gyroBtn.style.background = 'rgba(0, 255, 204, 0.22)';
         gyroBtn.style.color = '#00ffcc';
         gyroBtn.style.borderColor = '#00ffcc';
@@ -1146,8 +1154,9 @@
       const hasSerial = isEspConnected && serialWriter;
       const hasWifi = isWifiConnected && wifiSocket && wifiSocket.readyState === 1;
       const hasGyroWs = gyroWsConnected && gyroSocket && gyroSocket.readyState === 1;
-      const hasGyroMqtt = gyroMqttPeerAlive && gyroMqttClient && gyroMqttClient.connected && gyroRoomId;
-      if (!hasSerial && !hasWifi && !hasGyroWs && !hasGyroMqtt) return;
+      const hasGyroRtc = gyroCtrlDc && gyroCtrlDc.readyState === 'open';
+      const hasGyroMqtt = !hasGyroRtc && gyroMqttPeerAlive && gyroMqttClient && gyroMqttClient.connected && gyroRoomId;
+      if (!hasSerial && !hasWifi && !hasGyroWs && !hasGyroRtc && !hasGyroMqtt) return;
       const state = stateOverride || (isGameOver ? 'OVER' : (isReloading ? 'RELOAD' : 'PLAY'));
       const hpPct = Math.round((Math.max(0, build.hp) / build.maxHp) * 100);
       const msg = `S:${build.ammo},${hpPct},${state},${build.maxAmmo}\n`;
@@ -1156,6 +1165,9 @@
       }
       if (hasGyroWs) {
         try { gyroSocket.send(msg); } catch (e) {}
+      }
+      if (hasGyroRtc) {
+        try { gyroCtrlDc.send(msg); } catch (e) {}
       }
       if (hasGyroMqtt) {
         try { gyroMqttClient.publish(`cyberrange3d/${gyroRoomId}/rx`, msg); } catch (e) {}
@@ -1205,9 +1217,8 @@
         const dx = parseFloat(parts[0]) || 0;
         const dy = parseFloat(parts[1]) || 0;
         const gyroSens = 0.018;
-        camera.rotation.y -= dx * gyroSens;
-        camera.rotation.x -= dy * gyroSens;
-        camera.rotation.x = Math.max(-Math.PI / 2.2, Math.min(Math.PI / 2.2, camera.rotation.x));
+        gyroYawBuffer -= dx * gyroSens;
+        gyroPitchBuffer -= dy * gyroSens;
       }
     }
 
@@ -1293,7 +1304,8 @@
       gyroMqttClient = client;
 
       client.on('connect', () => {
-        client.subscribe(`cyberrange3d/${gyroRoomId}/tx`, (err) => {
+        client.subscribe(`cyberrange3d/${gyroRoomId}/tx`);
+        client.subscribe(`cyberrange3d/${gyroRoomId}/sig_ph`, (err) => {
           if (!err && !gyroMqttPeerAlive) {
             gyroQrStatus.textContent = '⏳ 請用手機掃描上方 QR Code 配對...';
             gyroQrStatus.style.color = '#facc15';
@@ -1301,8 +1313,102 @@
         });
       });
 
-      client.on('message', (topic, payload) => {
+      function closeGyroRtc() {
+        gyroRtcConnected = false;
+        gyroRemoteIceQueue = [];
+        if (gyroAimDc) { try { gyroAimDc.close(); } catch (e) {} gyroAimDc = null; }
+        if (gyroCtrlDc) { try { gyroCtrlDc.close(); } catch (e) {} gyroCtrlDc = null; }
+        if (gyroRtcPc) { try { gyroRtcPc.close(); } catch (e) {} gyroRtcPc = null; }
+      }
+
+      async function startGyroWebRTCHost() {
+        if (typeof RTCPeerConnection === 'undefined' || !gyroMqttClient || !gyroMqttClient.connected || !gyroRoomId) return;
+        closeGyroRtc();
+        try {
+          const pc = new RTCPeerConnection({
+            iceServers: [
+              { urls: ['stun:stun.l.google.com:19302', 'stun:stun1.l.google.com:19302'] }
+            ]
+          });
+          gyroRtcPc = pc;
+
+          const bindDataChannel = (dc) => {
+            dc.onopen = () => {
+              if (dc.label === 'aim') {
+                gyroRtcConnected = true;
+                updatePhoneGyroUI();
+                if (gyroQrModal.style.display !== 'none') {
+                  gyroQrStatus.textContent = '⚡ WebRTC P2P 直連已建立（超低延遲）！';
+                  gyroQrStatus.style.color = '#00ffcc';
+                  setTimeout(() => { gyroQrModal.style.display = 'none'; }, 600);
+                }
+              }
+            };
+            dc.onclose = () => {
+              if (dc.label === 'aim') {
+                gyroRtcConnected = false;
+                updatePhoneGyroUI();
+              }
+            };
+            dc.onmessage = (ev) => {
+              const lines = String(ev.data || '').split(/\r?\n/);
+              for (const raw of lines) handleEspCommand(raw);
+            };
+          };
+
+          gyroAimDc = pc.createDataChannel('aim', { ordered: false, maxRetransmits: 0 });
+          gyroCtrlDc = pc.createDataChannel('ctrl', { ordered: true });
+          bindDataChannel(gyroAimDc);
+          bindDataChannel(gyroCtrlDc);
+
+          pc.onicecandidate = (ev) => {
+            if (ev.candidate && gyroMqttClient && gyroMqttClient.connected) {
+              gyroMqttClient.publish(`cyberrange3d/${gyroRoomId}/sig_pc`, JSON.stringify({
+                type: 'ice',
+                candidate: ev.candidate
+              }));
+            }
+          };
+
+          pc.onconnectionstatechange = () => {
+            if (pc.connectionState === 'failed' || pc.connectionState === 'closed') {
+              gyroRtcConnected = false;
+              updatePhoneGyroUI();
+            }
+          };
+
+          const offer = await pc.createOffer();
+          await pc.setLocalDescription(offer);
+          gyroMqttClient.publish(`cyberrange3d/${gyroRoomId}/sig_pc`, JSON.stringify({
+            type: 'offer',
+            sdp: pc.localDescription
+          }));
+        } catch (e) {}
+      }
+
+      client.on('message', async (topic, payload) => {
         const text = payload ? payload.toString() : '';
+        if (topic.endsWith('/sig_ph')) {
+          try {
+            const sig = JSON.parse(text);
+            if (sig.type === 'hello') {
+              startGyroWebRTCHost();
+            } else if (sig.type === 'answer' && gyroRtcPc && sig.sdp) {
+              await gyroRtcPc.setRemoteDescription(new RTCSessionDescription(sig.sdp));
+              while (gyroRemoteIceQueue.length > 0) {
+                const c = gyroRemoteIceQueue.shift();
+                try { await gyroRtcPc.addIceCandidate(new RTCIceCandidate(c)); } catch (e) {}
+              }
+            } else if (sig.type === 'ice' && sig.candidate) {
+              if (gyroRtcPc && gyroRtcPc.remoteDescription) {
+                try { await gyroRtcPc.addIceCandidate(new RTCIceCandidate(sig.candidate)); } catch (e) {}
+              } else {
+                gyroRemoteIceQueue.push(sig.candidate);
+              }
+            }
+          } catch (e) {}
+          return;
+        }
         const lines = text.split(/\r?\n/);
         for (const raw of lines) {
           const cmd = raw.trim();
@@ -1311,11 +1417,13 @@
             const alive = cmd.includes(':connected:');
             const wasAlive = gyroMqttPeerAlive;
             gyroMqttPeerAlive = alive;
+            if (!alive && gyroRtcConnected) closeGyroRtc();
             updatePhoneGyroUI();
             if (alive && !wasAlive) {
-              gyroQrStatus.textContent = '✅ 手機陀螺儀已成功連線！';
+              gyroQrStatus.textContent = '✅ 已連上中繼，正在升級 P2P 直連...';
               gyroQrStatus.style.color = '#34d399';
-              setTimeout(() => { gyroQrModal.style.display = 'none'; }, 700);
+              startGyroWebRTCHost();
+              setTimeout(() => { if (!gyroRtcConnected) gyroQrModal.style.display = 'none'; }, 1200);
             }
           } else {
             if (!gyroMqttPeerAlive) {
@@ -2743,6 +2851,8 @@
     function resetTouchInputs() {
       mobileMoveX = 0;
       mobileMoveY = 0;
+      gyroYawBuffer = 0;
+      gyroPitchBuffer = 0;
       const knob = document.getElementById('mob-joy-knob');
       if (knob) knob.style.transform = 'translate(0px, 0px)';
       const fireBtn = document.getElementById('mob-fire');
@@ -3723,6 +3833,20 @@
       const isFiringNow = isPlaying && !isLevelUpOpen && !isReloading && (isMouseDown || isEspFireHeld) && build.ammo > 0;
       if (currentWeapon && currentWeapon.update) {
         currentWeapon.update(dt, isFiringNow, isReloading, reloadProgress);
+      }
+
+      if (isPlaying) {
+        // 陀螺儀亞幀平滑插值消耗（兼顧 P2P 極速響應與無線網路微抖動消除）
+        if (Math.abs(gyroYawBuffer) > 0.00001 || Math.abs(gyroPitchBuffer) > 0.00001) {
+          const fastPath = gyroRtcConnected || gyroWsConnected;
+          const drain = 1 - Math.exp(-(fastPath ? 58 : 38) * dt);
+          const stepY = gyroYawBuffer * drain;
+          const stepX = gyroPitchBuffer * drain;
+          camera.rotation.y += stepY;
+          camera.rotation.x = Math.max(-Math.PI / 2.2, Math.min(Math.PI / 2.2, camera.rotation.x + stepX));
+          gyroYawBuffer -= stepY;
+          gyroPitchBuffer -= stepX;
+        }
       }
 
       if (isPlaying && isLevelUpOpen) {
