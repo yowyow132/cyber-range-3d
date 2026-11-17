@@ -645,12 +645,26 @@
       <span>硬體槍控（選配，可純用鍵鼠遊玩）：</span>
       <button id="esp-btn" style="background: rgba(56, 189, 248, 0.14); color: #38bdf8; border: 1px solid rgba(56,189,248,0.45);">🔌 連接 ESP32 (USB)</button>
       <button id="wifi-btn" style="background: rgba(168, 85, 247, 0.14); color: #d8b4fe; border: 1px solid rgba(168,85,247,0.45);">📶 Wi-Fi 無線槍控</button>
-      <button id="gyro-btn" style="background: rgba(16, 185, 129, 0.14); color: #34d399; border: 1px solid rgba(16,185,129,0.45);">📱 手機陀螺儀 (待命)</button>
+      <button id="gyro-btn" style="background: rgba(16, 185, 129, 0.14); color: #34d399; border: 1px solid rgba(16,185,129,0.45);">📱 掃碼連手機陀螺儀</button>
+    </div>
+  </div>
+
+  <!-- 手機陀螺儀 QR Code 配對視窗 -->
+  <div id="gyro-qr-modal" style="display:none; position:fixed; inset:0; z-index:200; background:rgba(4,7,15,0.88); backdrop-filter:blur(6px); align-items:center; justify-content:center; padding:20px;">
+    <div style="background:#0f172a; border:1px solid rgba(0,255,204,0.45); border-radius:16px; padding:24px 26px; max-width:380px; width:100%; text-align:center; box-shadow:0 0 36px rgba(0,255,204,0.2);">
+      <div style="font-size:19px; font-weight:800; color:#00ffcc; margin-bottom:6px;">📱 手機掃碼直連陀螺儀</div>
+      <div style="font-size:13px; color:#94a3b8; margin-bottom:14px;">用手機相機掃描下方 QR Code 即可直接配對（免開伺服器）</div>
+      <div id="gyro-qr-box" style="display:inline-block; background:#ffffff; padding:12px; border-radius:12px; margin-bottom:12px; min-width:180px; min-height:180px;"></div>
+      <div id="gyro-qr-status" style="font-size:13px; font-weight:700; color:#facc15; margin-bottom:10px;">⏳ 正在產生配對碼...</div>
+      <div id="gyro-qr-url" style="font-size:11px; color:#64748b; word-break:break-all; background:rgba(2,6,23,0.6); padding:8px; border-radius:8px; margin-bottom:14px; user-select:all;"></div>
+      <button id="gyro-qr-close" style="padding:9px 22px; border-radius:8px; border:1px solid rgba(148,163,184,0.4); background:rgba(30,41,59,0.9); color:#e2e8f0; font-weight:700; cursor:pointer;">關閉視窗</button>
     </div>
   </div>
 
   <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/loaders/GLTFLoader.js"></script>
+  <script src="https://unpkg.com/peerjs@1.5.4/dist/peerjs.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/qrcode-generator@1.4.4/qrcode.min.js"></script>
   <script src="world-art.js"></script>
   <script src="roguelite-data.js"></script>
   <script>
@@ -1083,12 +1097,21 @@
     // --- ESP32 雙模連線 (USB Web Serial + Wi-Fi WebSocket) ＋ 手機陀螺儀中繼 ---
     const wifiBtn = document.getElementById('wifi-btn');
     const gyroBtn = document.getElementById('gyro-btn');
+    const gyroQrModal = document.getElementById('gyro-qr-modal');
+    const gyroQrBox = document.getElementById('gyro-qr-box');
+    const gyroQrStatus = document.getElementById('gyro-qr-status');
+    const gyroQrUrlEl = document.getElementById('gyro-qr-url');
+    const gyroQrClose = document.getElementById('gyro-qr-close');
     let serialPort = null;
     let serialWriter = null;
     let isEspConnected = false;
     let wifiSocket = null;
     let isWifiConnected = false;
     let gyroSocket = null;
+    let gyroWsConnected = false;
+    let gyroPeer = null;
+    let gyroPeerId = null;
+    let gyroPeerConn = null;
     let isPhoneGyroConnected = false;
     let espMoveX = 0;
     let espMoveY = 0;
@@ -1101,19 +1124,41 @@
       espStatusEl.textContent = parts.length ? parts.join(' + ') : '滑鼠 + 鍵盤';
     }
 
+    function updatePhoneGyroUI() {
+      isPhoneGyroConnected = gyroWsConnected || Boolean(gyroPeerConn && gyroPeerConn.open);
+      if (isPhoneGyroConnected) {
+        gyroBtn.textContent = '📱 手機陀螺儀 ✅ 已連線';
+        gyroBtn.style.background = 'rgba(0, 255, 204, 0.22)';
+        gyroBtn.style.color = '#00ffcc';
+        gyroBtn.style.borderColor = '#00ffcc';
+        syncToESP32('PLAY');
+      } else {
+        espMoveX = 0; espMoveY = 0;
+        gyroBtn.textContent = '📱 掃碼連手機陀螺儀';
+        gyroBtn.style.background = 'rgba(16, 185, 129, 0.14)';
+        gyroBtn.style.color = '#34d399';
+        gyroBtn.style.borderColor = 'rgba(16,185,129,0.45)';
+      }
+      refreshEspStatusLabel();
+    }
+
     async function syncToESP32(stateOverride = null) {
       const hasSerial = isEspConnected && serialWriter;
       const hasWifi = isWifiConnected && wifiSocket && wifiSocket.readyState === 1;
-      const hasGyro = isPhoneGyroConnected && gyroSocket && gyroSocket.readyState === 1;
-      if (!hasSerial && !hasWifi && !hasGyro) return;
+      const hasGyroWs = gyroWsConnected && gyroSocket && gyroSocket.readyState === 1;
+      const hasGyroPeer = gyroPeerConn && gyroPeerConn.open;
+      if (!hasSerial && !hasWifi && !hasGyroWs && !hasGyroPeer) return;
       const state = stateOverride || (isGameOver ? 'OVER' : (isReloading ? 'RELOAD' : 'PLAY'));
       const hpPct = Math.round((Math.max(0, build.hp) / build.maxHp) * 100);
       const msg = `S:${build.ammo},${hpPct},${state},${build.maxAmmo}\n`;
       if (hasWifi) {
         try { wifiSocket.send(msg); } catch (e) {}
       }
-      if (hasGyro) {
+      if (hasGyroWs) {
         try { gyroSocket.send(msg); } catch (e) {}
+      }
+      if (hasGyroPeer) {
+        try { gyroPeerConn.send(msg); } catch (e) {}
       }
       if (hasSerial) {
         try { await serialWriter.write(new TextEncoder().encode(msg)); } catch (e) {}
@@ -1147,22 +1192,8 @@
         };
         requestAnimationFrame(spin);
       } else if (cmd.startsWith('GYRO_STATUS:')) {
-        const connected = cmd.includes(':connected:');
-        isPhoneGyroConnected = connected;
-        if (connected) {
-          gyroBtn.textContent = '📱 手機陀螺儀 ✅ 已連線';
-          gyroBtn.style.background = 'rgba(0, 255, 204, 0.22)';
-          gyroBtn.style.color = '#00ffcc';
-          gyroBtn.style.borderColor = '#00ffcc';
-          syncToESP32('PLAY');
-        } else {
-          espMoveX = 0; espMoveY = 0;
-          gyroBtn.textContent = '📱 手機陀螺儀 (待命)';
-          gyroBtn.style.background = 'rgba(16, 185, 129, 0.14)';
-          gyroBtn.style.color = '#34d399';
-          gyroBtn.style.borderColor = 'rgba(16,185,129,0.45)';
-        }
-        refreshEspStatusLabel();
+        gyroWsConnected = cmd.includes(':connected:');
+        updatePhoneGyroUI();
       } else if (cmd.startsWith('MOVE:')) {
         const parts = cmd.slice(5).split(',');
         const mx = parseFloat(parts[0]) || 0;
@@ -1180,7 +1211,19 @@
       }
     }
 
+    function shouldUseLocalRelay() {
+      const h = location.hostname || '';
+      return (
+        location.protocol === 'file:' ||
+        h === 'localhost' ||
+        h === '127.0.0.1' ||
+        h.endsWith('.trycloudflare.com') ||
+        /^(192\.168\.|10\.|172\.(1[6-9]|2\d|3[01])\.)/.test(h)
+      );
+    }
+
     function connectPhoneGyroRelay() {
+      if (!shouldUseLocalRelay()) return;
       const wsUrl = (location.host && (location.protocol === 'http:' || location.protocol === 'https:'))
         ? `${location.protocol === 'https:' ? 'wss:' : 'ws:'}//${location.host}/ws?role=game`
         : 'ws://127.0.0.1:8088/ws?role=game';
@@ -1192,7 +1235,10 @@
           for (const raw of lines) handleEspCommand(raw);
         };
         ws.onclose = () => {
-          if (isPhoneGyroConnected) handleEspCommand('GYRO_STATUS:disconnected:0');
+          if (gyroWsConnected) {
+            gyroWsConnected = false;
+            updatePhoneGyroUI();
+          }
           setTimeout(connectPhoneGyroRelay, 2500);
         };
         ws.onerror = () => {};
@@ -1200,18 +1246,116 @@
     }
     connectPhoneGyroRelay();
 
-    gyroBtn.addEventListener('click', async () => {
-      const apiUrl = (location.host && (location.protocol === 'http:' || location.protocol === 'https:'))
-        ? '/api/info'
-        : 'http://127.0.0.1:8088/api/info';
+    function renderQrForUrl(url) {
+      gyroQrUrlEl.textContent = url;
+      if (typeof qrcode === 'function') {
+        const qr = qrcode(0, 'M');
+        qr.addData(url);
+        qr.make();
+        gyroQrBox.innerHTML = qr.createSvgTag(5, 8);
+      } else {
+        gyroQrBox.textContent = '請手動開啟下方網址';
+      }
+    }
+
+    async function buildGyroPairUrl(peerId) {
+      if (location.protocol === 'https:' && location.host) {
+        const u = new URL('gyro.html', location.href);
+        u.searchParams.set('peer', peerId);
+        return u.toString();
+      }
+      // 本機開發時優先向 server.py 取得區網 HTTPS 網址，沒有則用公開 GitHub Pages
       try {
+        const apiUrl = location.host ? '/api/info' : 'http://127.0.0.1:8088/api/info';
         const res = await fetch(apiUrl);
-        if (!res.ok) throw new Error('no relay');
-        const info = await res.json();
-        const url = (info.gyro_urls && info.gyro_urls[0]) || `https://<電腦IP>:${info.https_port || 8443}/gyro.html`;
-        prompt('請用手機瀏覽器開啟此 HTTPS 網址（若跳出憑證警告請點「進階 → 繼續前往」）：', url);
-      } catch (e) {
-        alert('請先啟動 server.py，並改用 http://localhost:8088/ 開啟遊戲！');
+        if (res.ok) {
+          const info = await res.json();
+          if (info.gyro_urls && info.gyro_urls[0]) {
+            return `${info.gyro_urls[0]}?peer=${encodeURIComponent(peerId)}`;
+          }
+        }
+      } catch (e) {}
+      return `https://yowyow132.github.io/cyber-range-3d/gyro.html?peer=${encodeURIComponent(peerId)}`;
+    }
+
+    function ensureGyroPeerHost() {
+      if (gyroPeer && !gyroPeer.destroyed) return;
+      if (typeof Peer === 'undefined') {
+        gyroQrStatus.textContent = '❌ 無法載入 PeerJS（請確認網路連線）';
+        gyroQrStatus.style.color = '#f87171';
+        return;
+      }
+      gyroPeerId = 'cr3d-' + Math.random().toString(36).slice(2, 8);
+      const peer = new Peer(gyroPeerId, {
+        config: {
+          iceServers: [
+            { urls: 'stun:stun.l.google.com:19302' },
+            { urls: 'stun:stun1.l.google.com:19302' },
+            { urls: 'stun:stun.cloudflare.com:3478' }
+          ]
+        }
+      });
+      gyroPeer = peer;
+
+      peer.on('open', async (id) => {
+        const url = await buildGyroPairUrl(id);
+        renderQrForUrl(url);
+        gyroQrStatus.textContent = '⏳ 請用手機掃描上方 QR Code 配對...';
+        gyroQrStatus.style.color = '#facc15';
+      });
+
+      peer.on('connection', (conn) => {
+        if (gyroPeerConn && gyroPeerConn !== conn) {
+          try { gyroPeerConn.close(); } catch (e) {}
+        }
+        gyroPeerConn = conn;
+        conn.on('open', () => {
+          updatePhoneGyroUI();
+          gyroQrStatus.textContent = '✅ 手機陀螺儀已成功連線！';
+          gyroQrStatus.style.color = '#34d399';
+          setTimeout(() => { gyroQrModal.style.display = 'none'; }, 750);
+        });
+        conn.on('data', (data) => {
+          const lines = String(data || '').split(/\r?\n/);
+          for (const raw of lines) handleEspCommand(raw);
+        });
+        conn.on('close', () => {
+          if (gyroPeerConn === conn) gyroPeerConn = null;
+          updatePhoneGyroUI();
+        });
+        conn.on('error', () => {
+          if (gyroPeerConn === conn) gyroPeerConn = null;
+          updatePhoneGyroUI();
+        });
+      });
+
+      peer.on('error', (err) => {
+        gyroQrStatus.textContent = '⚠️ 配對連線異常：' + (err.type || err.message || err);
+        gyroQrStatus.style.color = '#f87171';
+      });
+    }
+
+    gyroQrClose.addEventListener('click', () => {
+      gyroQrModal.style.display = 'none';
+    });
+
+    gyroBtn.addEventListener('click', async () => {
+      gyroQrModal.style.display = 'flex';
+      if (gyroPeer && gyroPeer.open && gyroPeerId) {
+        const url = await buildGyroPairUrl(gyroPeerId);
+        renderQrForUrl(url);
+        if (gyroPeerConn && gyroPeerConn.open) {
+          gyroQrStatus.textContent = '✅ 手機陀螺儀已連線！';
+          gyroQrStatus.style.color = '#34d399';
+        } else {
+          gyroQrStatus.textContent = '⏳ 請用手機掃描上方 QR Code 配對...';
+          gyroQrStatus.style.color = '#facc15';
+        }
+      } else {
+        gyroQrBox.innerHTML = '';
+        gyroQrStatus.textContent = '⏳ 正在產生配對碼...';
+        gyroQrStatus.style.color = '#facc15';
+        ensureGyroPeerHost();
       }
     });
 

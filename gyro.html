@@ -184,6 +184,7 @@
     </div>
   </div>
 
+  <script src="https://unpkg.com/peerjs@1.5.4/dist/peerjs.min.js"></script>
   <script>
     const wsBadge = document.getElementById('ws-badge');
     const toggleBtn = document.getElementById('toggle-gyro-btn');
@@ -286,7 +287,75 @@
       localStorage.setItem('gyro_inv_y', invY ? '1' : '0');
     });
 
-    // --- 1. WebSocket 連線（自動重連）---
+    // --- 1. 連線引擎（有 ?peer= 走 WebRTC P2P 直連，否則走本機 WebSocket 中繼）---
+    const targetPeerId = new URLSearchParams(location.search).get('peer');
+    let peerObj = null;
+    let peerConn = null;
+
+    function handleIncomingSync(raw) {
+      const lines = String(raw || '').split(/\r?\n/);
+      for (const line of lines) {
+        if (line.startsWith('S:')) {
+          const p = line.slice(2).split(',');
+          if (p.length >= 3) {
+            const ammo = parseInt(p[0], 10) || 0;
+            const hp = parseInt(p[1], 10) || 0;
+            const st = p[2] || 'PLAY';
+            const maxA = parseInt(p[3], 10) || ammo;
+            hudAmmoEl.textContent = `${ammo}/${maxA}`;
+            hudHpEl.textContent = `${hp}%`;
+            hudHpEl.classList.toggle('warn', hp <= 30);
+            hudStateEl.textContent = st;
+          }
+        }
+      }
+    }
+
+    function connectPeer(peerId) {
+      if (typeof Peer === 'undefined') {
+        wsBadge.textContent = 'PeerJS 載入失敗';
+        return;
+      }
+      wsBadge.textContent = 'P2P 配對中...';
+      wsBadge.classList.remove('ok');
+
+      peerObj = new Peer({
+        config: {
+          iceServers: [
+            { urls: 'stun:stun.l.google.com:19302' },
+            { urls: 'stun:stun1.l.google.com:19302' },
+            { urls: 'stun:stun.cloudflare.com:3478' }
+          ]
+        }
+      });
+
+      function openDataConn() {
+        if (!peerObj || peerObj.destroyed) return;
+        const conn = peerObj.connect(peerId, { reliable: true });
+        peerConn = conn;
+        conn.on('open', () => {
+          wsBadge.textContent = 'P2P 直連電腦';
+          wsBadge.classList.add('ok');
+        });
+        conn.on('data', handleIncomingSync);
+        conn.on('close', () => {
+          wsBadge.textContent = 'P2P 重連中...';
+          wsBadge.classList.remove('ok');
+          setTimeout(openDataConn, 1500);
+        });
+        conn.on('error', () => {
+          wsBadge.textContent = 'P2P 連線失敗';
+          wsBadge.classList.remove('ok');
+        });
+      }
+
+      peerObj.on('open', openDataConn);
+      peerObj.on('error', (err) => {
+        wsBadge.textContent = '配對失敗: ' + (err.type || 'err');
+        wsBadge.classList.remove('ok');
+      });
+    }
+
     function connectWS() {
       const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
       ws = new WebSocket(`${proto}//${location.host}/ws?role=gyro`);
@@ -297,24 +366,7 @@
         wsBadge.textContent = '已連線電腦';
         wsBadge.classList.add('ok');
       };
-      ws.onmessage = (ev) => {
-        const lines = String(ev.data || '').split(/\r?\n/);
-        for (const line of lines) {
-          if (line.startsWith('S:')) {
-            const p = line.slice(2).split(',');
-            if (p.length >= 3) {
-              const ammo = parseInt(p[0], 10) || 0;
-              const hp = parseInt(p[1], 10) || 0;
-              const st = p[2] || 'PLAY';
-              const maxA = parseInt(p[3], 10) || ammo;
-              hudAmmoEl.textContent = `${ammo}/${maxA}`;
-              hudHpEl.textContent = `${hp}%`;
-              hudHpEl.classList.toggle('warn', hp <= 30);
-              hudStateEl.textContent = st;
-            }
-          }
-        }
-      };
+      ws.onmessage = (ev) => handleIncomingSync(ev.data);
       ws.onclose = () => {
         wsBadge.textContent = '斷線重連中';
         wsBadge.classList.remove('ok');
@@ -324,11 +376,19 @@
         try { ws.close(); } catch (e) {}
       };
     }
-    connectWS();
+
+    if (targetPeerId) {
+      connectPeer(targetPeerId);
+    } else {
+      connectWS();
+    }
 
     function sendCmd(msg) {
-      if (ws && ws.readyState === 1) {
-        ws.send(msg.endsWith('\n') ? msg : (msg + '\n'));
+      const payload = msg.endsWith('\n') ? msg : (msg + '\n');
+      if (peerConn && peerConn.open) {
+        try { peerConn.send(payload); } catch (e) {}
+      } else if (ws && ws.readyState === 1) {
+        ws.send(payload);
       }
     }
 
