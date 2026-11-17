@@ -114,15 +114,15 @@
     const base = {
       // 基礎角色與武器數值
       level: 1,
-      maxHp: 100,
-      hp: 100,
+      maxHp: 120,
+      hp: 120,
       maxAmmo: 8,
       ammo: 8,
       reloadTimeMs: 850,
       fireCooldownMs: 260,
       bulletDamage: 1,
       projectilesPerShot: 1,
-      magnetRange: 4.8,
+      magnetRange: 6.2,
       isAutoFire: false,
       weaponName: '🔫 MK-I 脈衝手槍',
       weaponStyle: 'pistol', // 'pistol' | 'smg' | 'shotgun' | 'railgun' | 'plasma'
@@ -723,20 +723,35 @@
     const isBossWave = w % 3 === 0;
     const bossTier = Math.floor(w / 3);
 
-    const spawnIntervalSec = Math.max(0.45, Number((1.65 - (w - 1) * 0.16).toFixed(2)));
-    const spawnBatch = Math.min(6, w); // W1:1, W2:2, W3:3, W4:4, W5:5, W6+:6
-    const maxEnemies = Math.min(52, 4 + w * 6); // W1:10, W2:16, W3:22, W4:28, W5:34, W6:40...
-    const enemyBaseSpeed = Number((2.85 + (w - 1) * 0.25).toFixed(2));
+    const spawnIntervalSec =
+      w === 1 ? 2.35 :
+      w === 2 ? 1.95 :
+      Math.max(0.48, Number((1.75 - (w - 3) * 0.22).toFixed(2)));
+    const spawnBatch = w === 1 ? 1 : (w <= 3 ? 2 : Math.min(6, w - 1));
+    const maxEnemies =
+      w === 1 ? 5 :
+      w === 2 ? 9 :
+      w === 3 ? 14 :
+      Math.min(52, 14 + (w - 3) * 7);
+    const enemyBaseSpeed =
+      w === 1 ? 2.10 :
+      w === 2 ? 2.45 :
+      Number((2.80 + (w - 3) * 0.28).toFixed(2));
     const speedMultiplier = Number((1 + Math.min(1.4, (w - 1) * 0.07)).toFixed(2));
+    const enemyDamageScale =
+      w === 1 ? 0.55 :
+      w === 2 ? 0.75 :
+      w === 3 ? 0.90 :
+      Math.min(1.45, Number((1.0 + (w - 4) * 0.06).toFixed(2)));
 
-    const scoutWeight = w === 1 ? 0.75 : Math.max(0.28, Number((0.56 - (w - 1) * 0.04).toFixed(2)));
-    const turretWeight = w === 1 ? 0.25 : Number((0.22 + Math.min(0.06, w * 0.008)).toFixed(2));
-    const chargerWeight = w === 1 ? 0 : Number(Math.min(0.24, 0.12 + (w - 2) * 0.025).toFixed(2));
+    const scoutWeight = w === 1 ? 0.85 : Math.max(0.28, Number((0.58 - (w - 1) * 0.04).toFixed(2)));
+    const turretWeight = w === 1 ? 0.15 : Number((0.20 + Math.min(0.08, w * 0.01)).toFixed(2));
+    const chargerWeight = w === 1 ? 0 : Number(Math.min(0.24, 0.10 + (w - 2) * 0.025).toFixed(2));
     const shielderWeight = w <= 2 ? 0 : Number(Math.min(0.20, 0.08 + (w - 3) * 0.025).toFixed(2));
     const heavyWeight = w <= 1 ? 0 : Number(Math.max(0.08, 1 - scoutWeight - turretWeight - chargerWeight - shielderWeight).toFixed(2));
 
     const scoutHp = 1 + Math.floor((w - 1) / 3);
-    const turretHp = 2 + Math.floor((w - 1) * 0.65);
+    const turretHp = w === 1 ? 1.5 : (2 + Math.floor((w - 1) * 0.65));
     const heavyHp = 3 + Math.floor(w * 0.9);
     const chargerHp = 1.5 + Math.floor((w - 1) / 2);
     const shielderHp = 3 + Math.floor(w * 0.8);
@@ -756,12 +771,12 @@
           type: 'boss',
           tier: bossTier,
           name: bossName,
-          hp: 26 + bossTier * 24 + bossTier * bossTier * 4,
-          speed: Number((1.65 + bossTier * 0.22).toFixed(2)),
+          hp: 16 + bossTier * 20 + bossTier * bossTier * 4,
+          speed: Number((1.55 + bossTier * 0.24).toFixed(2)),
           expDrop: 12 + bossTier * 6,
-          healDrop: 35 + bossTier * 10,
+          healDrop: 40 + bossTier * 10,
           scoreValue: 1500 * bossTier,
-          attackCooldownSec: Math.max(1.25, Number((2.4 - bossTier * 0.2).toFixed(2))),
+          attackCooldownSec: Math.max(1.25, Number((2.7 - bossTier * 0.22).toFixed(2))),
           rageThreshold: 0.45,
           minSpawnDist: 16,
           patterns: [
@@ -827,12 +842,13 @@
 
     return {
       wave: w,
-      killsPerWave: 12 + (w - 1) * 6,
+      killsPerWave: w === 1 ? 8 : (w === 2 ? 12 : 12 + (w - 2) * 6),
       spawnIntervalSec,
       spawnBatch,
       maxEnemies,
       enemyBaseSpeed,
       speedMultiplier,
+      enemyDamageScale,
       enemyWeights: {
         scout: scoutWeight,
         turret: turretWeight,
@@ -843,16 +859,16 @@
       enemyStats: {
         scout: {
           hp: scoutHp,
-          speed: Number((enemyBaseSpeed * 1.2).toFixed(2)),
+          speed: Number((enemyBaseSpeed * 1.15).toFixed(2)),
           expDrop: 1,
           scoreValue: 100 * w
         },
         turret: {
           hp: turretHp,
-          speed: Number((enemyBaseSpeed * 0.82).toFixed(2)),
+          speed: Number((enemyBaseSpeed * 0.80).toFixed(2)),
           expDrop: 2,
           scoreValue: 150 * w,
-          shootIntervalSec: Math.max(0.85, Number((2.0 - w * 0.12).toFixed(2)))
+          shootIntervalSec: w === 1 ? 2.85 : Math.max(0.85, Number((2.35 - (w - 2) * 0.16).toFixed(2)))
         },
         heavy: {
           hp: heavyHp,
