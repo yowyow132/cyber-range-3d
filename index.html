@@ -645,6 +645,7 @@
       <span>硬體槍控（選配，可純用鍵鼠遊玩）：</span>
       <button id="esp-btn" style="background: rgba(56, 189, 248, 0.14); color: #38bdf8; border: 1px solid rgba(56,189,248,0.45);">🔌 連接 ESP32 (USB)</button>
       <button id="wifi-btn" style="background: rgba(168, 85, 247, 0.14); color: #d8b4fe; border: 1px solid rgba(168,85,247,0.45);">📶 Wi-Fi 無線槍控</button>
+      <button id="gyro-btn" style="background: rgba(16, 185, 129, 0.14); color: #34d399; border: 1px solid rgba(16,185,129,0.45);">📱 手機陀螺儀 (待命)</button>
     </div>
   </div>
 
@@ -1079,31 +1080,42 @@
       }, durationMs);
     }
 
-    // --- ESP32 雙模連線 (USB Web Serial + Wi-Fi WebSocket) ---
+    // --- ESP32 雙模連線 (USB Web Serial + Wi-Fi WebSocket) ＋ 手機陀螺儀中繼 ---
     const wifiBtn = document.getElementById('wifi-btn');
+    const gyroBtn = document.getElementById('gyro-btn');
     let serialPort = null;
     let serialWriter = null;
     let isEspConnected = false;
     let wifiSocket = null;
     let isWifiConnected = false;
+    let gyroSocket = null;
+    let isPhoneGyroConnected = false;
     let espMoveX = 0;
     let espMoveY = 0;
 
     function refreshEspStatusLabel() {
-      if (isWifiConnected) espStatusEl.textContent = 'Wi-Fi 無線槍控';
-      else if (isEspConnected) espStatusEl.textContent = 'USB ESP32 槍控';
-      else espStatusEl.textContent = '滑鼠 + 鍵盤';
+      const parts = [];
+      if (isWifiConnected) parts.push('Wi-Fi 無線槍控');
+      else if (isEspConnected) parts.push('USB ESP32 槍控');
+      if (isPhoneGyroConnected) parts.push('手機陀螺儀');
+      espStatusEl.textContent = parts.length ? parts.join(' + ') : '滑鼠 + 鍵盤';
     }
 
     async function syncToESP32(stateOverride = null) {
-      if ((!isEspConnected || !serialWriter) && (!isWifiConnected || !wifiSocket || wifiSocket.readyState !== 1)) return;
+      const hasSerial = isEspConnected && serialWriter;
+      const hasWifi = isWifiConnected && wifiSocket && wifiSocket.readyState === 1;
+      const hasGyro = isPhoneGyroConnected && gyroSocket && gyroSocket.readyState === 1;
+      if (!hasSerial && !hasWifi && !hasGyro) return;
       const state = stateOverride || (isGameOver ? 'OVER' : (isReloading ? 'RELOAD' : 'PLAY'));
       const hpPct = Math.round((Math.max(0, build.hp) / build.maxHp) * 100);
       const msg = `S:${build.ammo},${hpPct},${state},${build.maxAmmo}\n`;
-      if (isWifiConnected && wifiSocket && wifiSocket.readyState === 1) {
+      if (hasWifi) {
         try { wifiSocket.send(msg); } catch (e) {}
       }
-      if (isEspConnected && serialWriter) {
+      if (hasGyro) {
+        try { gyroSocket.send(msg); } catch (e) {}
+      }
+      if (hasSerial) {
         try { await serialWriter.write(new TextEncoder().encode(msg)); } catch (e) {}
       }
     }
@@ -1123,6 +1135,34 @@
         performDash();
       } else if (cmd === 'JUMP' && isPlaying && !isLevelUpOpen && isGrounded) {
         playerVy = 7.2; isGrounded = false; playJumpSound();
+      } else if (cmd === 'GYRO_CENTER' && isPlaying) {
+        camera.rotation.x = 0;
+      } else if (cmd === 'TURN_180' && isPlaying) {
+        let steps = 8;
+        const stepYaw = Math.PI / steps;
+        const spin = () => {
+          if (!isPlaying || steps-- <= 0) return;
+          camera.rotation.y += stepYaw;
+          requestAnimationFrame(spin);
+        };
+        requestAnimationFrame(spin);
+      } else if (cmd.startsWith('GYRO_STATUS:')) {
+        const connected = cmd.includes(':connected:');
+        isPhoneGyroConnected = connected;
+        if (connected) {
+          gyroBtn.textContent = '📱 手機陀螺儀 ✅ 已連線';
+          gyroBtn.style.background = 'rgba(0, 255, 204, 0.22)';
+          gyroBtn.style.color = '#00ffcc';
+          gyroBtn.style.borderColor = '#00ffcc';
+          syncToESP32('PLAY');
+        } else {
+          espMoveX = 0; espMoveY = 0;
+          gyroBtn.textContent = '📱 手機陀螺儀 (待命)';
+          gyroBtn.style.background = 'rgba(16, 185, 129, 0.14)';
+          gyroBtn.style.color = '#34d399';
+          gyroBtn.style.borderColor = 'rgba(16,185,129,0.45)';
+        }
+        refreshEspStatusLabel();
       } else if (cmd.startsWith('MOVE:')) {
         const parts = cmd.slice(5).split(',');
         const mx = parseFloat(parts[0]) || 0;
@@ -1139,6 +1179,41 @@
         camera.rotation.x = Math.max(-Math.PI / 2.2, Math.min(Math.PI / 2.2, camera.rotation.x));
       }
     }
+
+    function connectPhoneGyroRelay() {
+      const wsUrl = (location.host && (location.protocol === 'http:' || location.protocol === 'https:'))
+        ? `${location.protocol === 'https:' ? 'wss:' : 'ws:'}//${location.host}/ws?role=game`
+        : 'ws://127.0.0.1:8088/ws?role=game';
+      try {
+        const ws = new WebSocket(wsUrl);
+        gyroSocket = ws;
+        ws.onmessage = (ev) => {
+          const lines = String(ev.data || '').split(/\r?\n/);
+          for (const raw of lines) handleEspCommand(raw);
+        };
+        ws.onclose = () => {
+          if (isPhoneGyroConnected) handleEspCommand('GYRO_STATUS:disconnected:0');
+          setTimeout(connectPhoneGyroRelay, 2500);
+        };
+        ws.onerror = () => {};
+      } catch (e) {}
+    }
+    connectPhoneGyroRelay();
+
+    gyroBtn.addEventListener('click', async () => {
+      const apiUrl = (location.host && (location.protocol === 'http:' || location.protocol === 'https:'))
+        ? '/api/info'
+        : 'http://127.0.0.1:8088/api/info';
+      try {
+        const res = await fetch(apiUrl);
+        if (!res.ok) throw new Error('no relay');
+        const info = await res.json();
+        const url = (info.gyro_urls && info.gyro_urls[0]) || `https://<電腦IP>:${info.https_port || 8443}/gyro.html`;
+        prompt('請用手機瀏覽器開啟此 HTTPS 網址（若跳出憑證警告請點「進階 → 繼續前往」）：', url);
+      } catch (e) {
+        alert('請先啟動 server.py，並改用 http://localhost:8088/ 開啟遊戲！');
+      }
+    });
 
     espBtn.addEventListener('click', async () => {
       if (!('serial' in navigator)) {
