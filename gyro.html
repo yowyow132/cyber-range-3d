@@ -148,7 +148,7 @@
 
       <div class="slider-row">
         <span>體感觸發</span>
-        <input id="gesture-slider" type="range" min="0.6" max="1.6" step="0.1" value="1.0" />
+        <input id="gesture-slider" type="range" min="0.5" max="2.0" step="0.1" value="1.0" />
         <span id="gesture-val" style="min-width:36px; text-align:right; color:#38bdf8;">1.0x</span>
       </div>
 
@@ -649,9 +649,9 @@
       }
 
       // 低通濾波追蹤世界垂直向上向量（重力反方向）
-      gravVec.x = gravVec.x * 0.88 + gxRaw * 0.12;
-      gravVec.y = gravVec.y * 0.88 + gyRaw * 0.12;
-      gravVec.z = gravVec.z * 0.88 + gzRaw * 0.12;
+      gravVec.x = gravVec.x * 0.82 + gxRaw * 0.18;
+      gravVec.y = gravVec.y * 0.82 + gyRaw * 0.18;
+      gravVec.z = gravVec.z * 0.82 + gzRaw * 0.18;
 
       const gLen = Math.hypot(gravVec.x, gravVec.y, gravVec.z);
       if (gLen < 2.5) return;
@@ -659,11 +659,18 @@
       const uy = gravVec.y / gLen;
       const uz = gravVec.z / gLen;
 
-      // 優先取去重力線性加速度，無則以高通差值備援
+      // 優先取去重力線性加速度；若裝置回傳全 0 或 null 則自動改用高通重力差值
+      const hpX = gxRaw - gravVec.x;
+      const hpY = gyRaw - gravVec.y;
+      const hpZ = gzRaw - gravVec.z;
       const acc = ev.acceleration;
-      const ax = (acc && acc.x !== null) ? acc.x : (gxRaw - gravVec.x);
-      const ay = (acc && acc.y !== null) ? acc.y : (gyRaw - gravVec.y);
-      const az = (acc && acc.z !== null) ? acc.z : (gzRaw - gravVec.z);
+      const hasAcc = acc && acc.x !== null && acc.y !== null && acc.z !== null;
+      const accMag = hasAcc ? Math.hypot(acc.x || 0, acc.y || 0, acc.z || 0) : 0;
+      const hpMag = Math.hypot(hpX, hpY, hpZ);
+      const useRawAcc = hasAcc && !(accMag < 0.05 && hpMag > 0.8);
+      const ax = useRawAcc ? acc.x : hpX;
+      const ay = useRawAcc ? acc.y : hpY;
+      const az = useRawAcc ? acc.z : hpZ;
 
       // 分解為「世界垂直方向 aUp」與「水平方向 aHoriz」
       const aUp = ax * ux + ay * uy + az * uz;
@@ -672,19 +679,19 @@
       const hz = az - aUp * uz;
       const aHoriz = Math.hypot(hx, hy, hz);
 
-      if (aUp < -8.5) lastDownSpikeMs = now;
+      if (aUp < -7.5) lastDownSpikeMs = now;
 
-      const jumpThresh = 9.0 / gestureSens;
-      const dashThresh = 10.0 / gestureSens;
+      const jumpThresh = 5.4 / gestureSens;
+      const dashThresh = 5.8 / gestureSens;
 
       if (now - lastGestureAnyMs < 320) return;
 
       // 1. 快速上抬 -> 跳躍 JUMP（避免往下放時的回彈誤觸）
       if (
         aUp >= jumpThresh &&
-        aUp > aHoriz * 0.85 &&
-        now - lastDownSpikeMs > 220 &&
-        now - lastGestureJumpMs > 700
+        aUp > aHoriz * 0.78 &&
+        now - lastDownSpikeMs > 170 &&
+        now - lastGestureJumpMs > 620
       ) {
         lastGestureJumpMs = now;
         lastGestureAnyMs = now;
@@ -696,9 +703,9 @@
       // 2. 快速往前推 -> 衝刺 DASH（排除急速轉身造成的離心力）
       if (
         aHoriz >= dashThresh &&
-        Math.abs(aUp) < aHoriz * 0.78 &&
-        rotMag < 200 &&
-        now - lastGestureDashMs > 850
+        Math.abs(aUp) < aHoriz * 0.85 &&
+        rotMag < 260 &&
+        now - lastGestureDashMs > 720
       ) {
         lastGestureDashMs = now;
         lastGestureAnyMs = now;
@@ -709,22 +716,23 @@
 
     function onDeviceMotion(ev) {
       if (!gyroActive) return;
+      const now = performance.now();
       const rr = ev.rotationRate;
-      if (!rr || (rr.alpha === null && rr.beta === null && rr.gamma === null)) return;
+      const hasRR = rr && (rr.alpha !== null || rr.beta !== null || rr.gamma !== null);
+      const rawA = hasRR ? (rr.alpha || 0) : 0;
+      const rawB = hasRR ? (rr.beta || 0) : 0;
+      const rawG = hasRR ? (rr.gamma || 0) : 0;
+      const rotMag = Math.hypot(rawA, rawB, rawG);
+
+      detectMotionGestures(ev, now, rotMag);
+
+      if (!hasRR) return;
 
       gotRotationRate = true;
       sensorModeEl.textContent = '感測器: 角速度 (6軸)';
 
-      const now = performance.now();
       const dt = lastMotionTs ? Math.min(0.06, (now - lastMotionTs) / 1000) : 0.016;
       lastMotionTs = now;
-
-      const rawA = rr.alpha || 0;
-      const rawB = rr.beta || 0;
-      const rawG = rr.gamma || 0;
-      const rotMag = Math.hypot(rawA, rawB, rawG);
-
-      detectMotionGestures(ev, now, rotMag);
 
       const a = Math.abs(rawA) < 1.8 ? 0 : rawA;
       const b = Math.abs(rawB) < 1.8 ? 0 : rawB;

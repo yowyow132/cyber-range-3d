@@ -1190,8 +1190,11 @@
         reloadAmmo();
       } else if (cmd === 'DASH' && isPlaying) {
         performDash();
-      } else if (cmd === 'JUMP' && isPlaying && !isLevelUpOpen && isGrounded) {
-        playerVy = 7.2; isGrounded = false; playJumpSound();
+      } else if (cmd === 'JUMP' && isPlaying && !isLevelUpOpen) {
+        const floorY = getFloorHeightAt(camera.position.x, camera.position.z, camera.position.y - 1.7);
+        if (isGrounded || (Math.abs(playerVy) < 0.25 && (camera.position.y - 1.7) <= floorY + 0.16)) {
+          playerVy = 7.2; isGrounded = false; playJumpSound();
+        }
       } else if (cmd === 'GYRO_CENTER' && isPlaying) {
         camera.rotation.x = 0;
       } else if (cmd === 'TURN_180' && isPlaying) {
