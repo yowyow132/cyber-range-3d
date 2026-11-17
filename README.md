@@ -1,6 +1,8 @@
 # CYBER RANGE 3D: ROGUELITE
 
-A fast-paced 3D Cyberpunk Arena Roguelite FPS built with **Three.js (r128)** and procedural **Web Audio Synthwave BGM + Layered SFX**, featuring telegraphed multi-phase Boss battles, jump-pad aerial combat, 3D time-freeze upgrade card shooting, and optional ESP32 hardware gun integration.
+> 📌 **目前開發進度總結與跨電腦接手指南請看：[PROJECT_SUMMARY.md](./PROJECT_SUMMARY.md)**
+
+A fast-paced 3D Cyberpunk Arena Roguelite FPS built with **Three.js (r128)** and procedural **Web Audio Synthwave BGM + Layered SFX**, featuring telegraphed multi-phase Boss battles, jump-pad aerial combat, 3D time-freeze upgrade card shooting, Demo Mode, Mobile-only touch controls, and optional ESP32 hardware gun integration.
 
 ## Features
 - **3 Starter Weapon Loadouts**: Pulse Assault Rifle (full-auto mobile), Plasma Grenade Launcher (arc AoE & shield-breaker), Armor-Piercing Railgun Sniper (piercing beam & high crit).
