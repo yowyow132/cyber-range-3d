@@ -1,0 +1,13 @@
+# Python
+.venv/
+__pycache__/
+
+# 韌體檔（從 micropython.org 下載，不進版控）
+*.bin
+
+# 課堂練習時 AI 產生的備份與測試檔
+maker-backup/
+maker-test.txt
+
+# VS Code／Chromium 出錯時寫在目前資料夾的記錄檔（2026-11-05 Codex 沙盒裡跑 code --version 產生）
+debug.log

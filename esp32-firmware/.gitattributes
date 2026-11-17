@@ -1,0 +1,4 @@
+# 行尾：bash 腳本一律 LF（CRLF 會讓 \r 黏進變數），Windows 腳本一律 CRLF
+*.sh   text eol=lf
+*.ps1  text eol=crlf
+*.cmd  text eol=crlf

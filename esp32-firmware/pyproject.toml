@@ -1,0 +1,14 @@
+[project]
+name = "maker-esp32"
+version = "0.1.0"
+description = "創客入門 ESP32 EZ Start Kit+ MicroPython 學生資料夾"
+requires-python = ">=3.10"
+dependencies = [
+    "mpremote",
+    "esptool",
+]
+
+[project.optional-dependencies]
+font = [
+    "Pillow",
+]

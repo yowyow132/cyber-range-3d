@@ -27,3 +27,15 @@ python -m http.server 8088
 Then open `http://localhost:8088/`.
 
 *(Also compatible with GitHub Pages directly from the `main` branch root.)*
+
+## ESP32 Firmware (`esp32-firmware/`)
+To flash the ESP32 gun controller on another PC:
+1. Edit `esp32-firmware/esp32/demos/fps_gun_wifi.py` and fill in your `WIFI_SSID` and `WIFI_PASS` (for Wi-Fi wireless mode).
+2. Install `uv` (or `pip install mpremote pyserial`) and make sure your ESP32 USB COM driver (CH340 / CP210x) is installed.
+3. Run from `esp32-firmware/`:
+   ```powershell
+   uv sync
+   .\tools\upload.ps1 -Lesson fps_gun_wifi
+   ```
+   *(Or use `-Lesson fps_gun` for USB Web Serial mode.)*
+
