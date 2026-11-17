@@ -2244,6 +2244,54 @@
       );
       hpBar.position.y = 1.55;
       group.add(core, ring, hpBar);
+    } else if (enemyType === 'dummy') {
+      // 'dummy': 演示用全息人形訓練標靶假人（可受擊閃白、掉落經驗、HP歸零自動重置）
+      const coreMat = new THREE.MeshStandardMaterial({
+        color: 0x38bdf8,
+        emissive: 0x0284c7,
+        emissiveIntensity: 0.9,
+        metalness: 0.45,
+        roughness: 0.22
+      });
+      core = new THREE.Mesh(
+        getGeo('dummy_core', function () { return new THREE.CylinderGeometry(0.58, 0.44, 1.65, 10); }),
+        coreMat
+      );
+
+      const head = new THREE.Mesh(
+        getGeo('dummy_head', function () { return new THREE.OctahedronGeometry(0.36, 1); }),
+        new THREE.MeshStandardMaterial({ color: 0xfacc15, emissive: 0xd97706, emissiveIntensity: 0.85 })
+      );
+      head.position.y = 1.15;
+
+      const pedestal = new THREE.Mesh(
+        getGeo('dummy_pedestal', function () { return new THREE.CylinderGeometry(0.95, 1.15, 0.28, 8); }),
+        armorDarkMat
+      );
+      pedestal.position.y = -1.65;
+
+      const baseRing = new THREE.Mesh(
+        getGeo('dummy_base_ring', function () { return new THREE.TorusGeometry(1.22, 0.05, 8, 32); }),
+        new THREE.MeshBasicMaterial({ color: 0x00ffcc })
+      );
+      baseRing.rotation.x = Math.PI / 2;
+      baseRing.position.y = -1.48;
+
+      ring = new THREE.Mesh(
+        getGeo('dummy_target_ring', function () { return new THREE.TorusGeometry(0.96, 0.05, 8, 32); }),
+        new THREE.MeshBasicMaterial({ color: 0xfacc15 })
+      );
+      ring.position.y = 0.15;
+      animParts.push({ obj: ring, rz: 1.8 });
+      animParts.push({ obj: head, ry: 2.0 });
+
+      hpBar = new THREE.Mesh(
+        new THREE.PlaneGeometry(1.7, 0.16),
+        new THREE.MeshBasicMaterial({ map: getHpBarTexture(), color: 0x00ffcc, side: THREE.DoubleSide })
+      );
+      hpBar.position.y = 1.95;
+
+      group.add(core, head, pedestal, baseRing, ring, hpBar);
     } else {
       // 'boss': 巨型多核科幻戰艦 Boss（有旋轉裝甲環與發光核心）
       const bossScale = 1 + Math.min(0.25, Math.max(0, wv - 3) * 0.025);

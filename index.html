@@ -262,6 +262,10 @@
     }
     #start-btn { background: linear-gradient(135deg, #00ffcc, #0284c7); color: #04101f; box-shadow: 0 0 24px rgba(0, 255, 204, 0.45); }
     #start-btn:hover { transform: scale(1.05); }
+    #demo-btn { background: rgba(250, 204, 21, 0.16); color: #fde047; border: 1.5px solid #facc15; box-shadow: 0 0 18px rgba(250, 204, 21, 0.25); }
+    #demo-btn:hover { transform: scale(1.05); background: rgba(250, 204, 21, 0.26); }
+    #switch-mode-btn { background: rgba(56, 189, 248, 0.16); color: #7dd3fc; border: 1px solid #38bdf8; padding: 11px 18px; font-size: 14px; }
+    #switch-mode-btn.hidden { display: none; }
     #mute-btn { background: rgba(255,255,255,0.1); color: #fff; border: 1px solid rgba(255,255,255,0.25); padding: 11px 18px; font-size: 14px; }
 
     /* 時間凍結升級橫幅 */
@@ -529,6 +533,8 @@
     </div>
     <div class="btn-row">
       <button id="start-btn">點擊進入戰場</button>
+      <button id="demo-btn">🎯 進入演示模式 (無敵靶機)</button>
+      <button id="switch-mode-btn" class="hidden">🏠 返回選單 / 切換模式</button>
       <button id="mute-btn">🔊 音效：開啟</button>
     </div>
     <div class="esp-row">
@@ -809,6 +815,7 @@
     let build = GameRoguelite.createInitialBuildState(selectedLoadoutId);
 
     let isPlaying = false;
+    let isDemoMode = false;
     let isGameOver = false;
     let isLevelUpOpen = false;
     let score = 0;
@@ -909,6 +916,8 @@
     const overlayTitle = document.getElementById('overlay-title');
     const overlaySub = document.getElementById('overlay-sub');
     const startBtn = document.getElementById('start-btn');
+    const demoBtn = document.getElementById('demo-btn');
+    const switchModeBtn = document.getElementById('switch-mode-btn');
     const espBtn = document.getElementById('esp-btn');
     const espStatusEl = document.getElementById('esp-status');
     const fireModeBadge = document.getElementById('fire-mode-badge');
@@ -1195,7 +1204,7 @@
     function updateHUD(stateOverride = null) {
       scoreEl.textContent = score;
       killsEl.textContent = kills;
-      waveEl.textContent = wave;
+      waveEl.textContent = isDemoMode ? 'DEMO (無敵靶機)' : wave;
       statDmgEl.textContent = build.bulletDamage;
       statExtraEl.textContent = `暴擊: ${Math.round((build.critChance || 0) * 100)}% (${(build.critMult || 2).toFixed(1)}x) | 浮游砲: ${build.droneCount || 0}/2`;
 
@@ -1817,8 +1826,40 @@
       }
     }
 
+    function spawnDemoDummy() {
+      const art = GameArt.createEnemyMesh('dummy', 1);
+      art.group.position.set(0, 1.85, 0);
+      Object.assign(art.group.userData, {
+        type: 'dummy',
+        hp: 25,
+        maxHp: 25,
+        speed: 0,
+        expDrop: 4,
+        scoreValue: 200,
+        core: art.core,
+        ring: art.ring,
+        hpBar: art.hpBar,
+        artUpdate: art.update,
+        bobOffset: 0,
+        baseY: 1.85,
+        hitFlashTimer: 0,
+        frostTimer: 0,
+        frostSlow: 0,
+        origColor: art.core.material.color.getHex(),
+        origEmissive: art.core.material.emissive.getHex()
+      });
+      scene.add(art.group);
+      enemies.push(art.group);
+      if (art.hpBar) art.hpBar.scale.x = 1;
+      shockwaves.push(GameArt.createShockwave(scene, art.group.position, 0xfacc15, 4.5));
+    }
+
     function spawnExpGems(pos, count) {
       for (let i = 0; i < count; i++) {
+        while (expGems.length >= 55) {
+          const oldest = expGems.shift();
+          scene.remove(oldest);
+        }
         const gem = new THREE.Mesh(
           new THREE.OctahedronGeometry(0.3, 0),
           new THREE.MeshStandardMaterial({ color: 0x38bdf8, emissive: 0x0284c7, emissiveIntensity: 1.0 })
@@ -1828,7 +1869,7 @@
           0.9,
           pos.z + (Math.random() - 0.5) * 2.0
         );
-        gem.userData = { life: 28.0 };
+        gem.userData = { life: isDemoMode ? 45.0 : 28.0 };
         scene.add(gem);
         expGems.push(gem);
       }
@@ -2107,6 +2148,45 @@
         updateBossHUD();
       }
 
+      if (ud.type === 'dummy') {
+        const dropAnchor = new THREE.Vector3(
+          enemyGroup.position.x + (Math.random() - 0.5) * 1.6,
+          0.9,
+          enemyGroup.position.z + 1.1 + Math.random() * 1.4
+        );
+        spawnExpGems(dropAnchor, 1);
+        score += Math.round(25 * getComboMultiplier(comboCount));
+        if (ud.core && ud.core.material && ud.core.material.emissive) {
+          ud.hitFlashTimer = 0.065;
+          ud.core.material.emissive.setHex(0xffffff);
+        }
+        if (ud.hp <= 0) {
+          ud.hp = ud.maxHp;
+          playKillSound();
+          comboCount++;
+          comboTimer = COMBO_WINDOW_SEC;
+          if (comboCount > maxComboThisRun) maxComboThisRun = comboCount;
+          kills++;
+          score += 200;
+          updateComboHUD();
+          shockwaves.push(GameArt.createShockwave(scene, enemyGroup.position, 0xfacc15, 5.2));
+          spawnExplosion(enemyGroup.position, 0xfacc15, 22);
+          spawnExpGems(dropAnchor, ud.expDrop || 4);
+          damagePopups.push(GameArt.createDamagePopup(scene, new THREE.Vector3(enemyGroup.position.x, enemyGroup.position.y + 1.2, enemyGroup.position.z), '🎯 靶機重置 +4 EXP', '#facc15'));
+          if (ud.hpBar) ud.hpBar.scale.x = 1;
+          updateHUD();
+          return false;
+        }
+        if (!opts.skipHitSound) {
+          if (opts.isCrit) playCritSound();
+          else playHitSound();
+        }
+        spawnExplosion(popupPos, opts.isCrit ? 0xfacc15 : 0x38bdf8, opts.isCrit ? 8 : 4);
+        if (ud.hpBar) ud.hpBar.scale.x = Math.max(0.05, ud.hp / ud.maxHp);
+        updateHUD();
+        return false;
+      }
+
       if (ud.hp <= 0) {
         const deathPos = enemyGroup.position.clone();
         playKillSound();
@@ -2346,15 +2426,46 @@
       lastFallbackY = null;
       for (const k in keys) keys[k] = false;
       if (!isGameOver && !isLevelUpOpen) {
-        overlayTitle.textContent = '遊戲暫停';
-        overlaySub.textContent = `LV.${build.level} | 分數：${score} | 目前最高連殺：${maxComboThisRun} — 按「繼續遊戲」回到戰場`;
-        startBtn.textContent = '繼續遊戲';
+        overlayTitle.textContent = isDemoMode ? '演示模式暫停' : '遊戲暫停';
+        overlaySub.textContent = isDemoMode
+          ? `🎯 演示模式（無敵靶機）| LV.${build.level} | 擊殺重置：${kills} — 按「繼續演示」或切換回主選單`
+          : `LV.${build.level} | 分數：${score} | 目前最高連殺：${maxComboThisRun} — 按「繼續遊戲」回到戰場`;
+        startBtn.textContent = isDemoMode ? '繼續演示' : '繼續遊戲';
+        if (demoBtn) demoBtn.classList.add('hidden');
+        if (switchModeBtn) switchModeBtn.classList.remove('hidden');
         if (loadoutPickerEl) loadoutPickerEl.style.display = 'none';
         if (pauseBuildPanelEl) {
           renderPauseBuildPanel();
           pauseBuildPanelEl.classList.remove('hidden');
         }
         overlay.classList.remove('hidden');
+      }
+    }
+
+    function launchGameSession(demoOverride = null) {
+      initAudio();
+      if (demoOverride !== null) {
+        resetGame(demoOverride);
+      } else if (isGameOver) {
+        resetGame(false);
+      }
+      if (demoBtn) demoBtn.classList.remove('hidden');
+      if (switchModeBtn) switchModeBtn.classList.add('hidden');
+      enterPlayMode();
+      if (isDemoMode) {
+        showBannerMsg('🎯 演示模式啟動：無敵狀態＋中央標靶假人（射擊掉經驗！）', '#facc15');
+      }
+      if (renderer.domElement && renderer.domElement.requestPointerLock) {
+        try {
+          const req = renderer.domElement.requestPointerLock();
+          if (req && typeof req.catch === 'function') {
+            req.catch(() => onPointerLockUnavailable());
+          }
+        } catch (err) {
+          onPointerLockUnavailable();
+        }
+      } else {
+        onPointerLockUnavailable();
       }
     }
 
@@ -2391,22 +2502,27 @@
     window.addEventListener('keyup', (e) => { keys[e.code] = false; });
 
     startBtn.addEventListener('click', () => {
-      initAudio();
-      if (isGameOver) resetGame();
-      enterPlayMode();
-      if (renderer.domElement && renderer.domElement.requestPointerLock) {
-        try {
-          const req = renderer.domElement.requestPointerLock();
-          if (req && typeof req.catch === 'function') {
-            req.catch(() => onPointerLockUnavailable());
-          }
-        } catch (err) {
-          onPointerLockUnavailable();
-        }
-      } else {
-        onPointerLockUnavailable();
-      }
+      launchGameSession(null);
     });
+
+    if (demoBtn) {
+      demoBtn.addEventListener('click', () => {
+        launchGameSession(true);
+      });
+    }
+
+    if (switchModeBtn) {
+      switchModeBtn.addEventListener('click', () => {
+        resetGame(false);
+        overlayTitle.textContent = 'CYBER RANGE 3D';
+        overlaySub.innerHTML = '賽博肉鴿科幻射擊 — 選擇開局武器流派，善用<b>彈射跳台空戰</b>、引爆<b>連鎖能量桶</b>並搶奪<b>戰場空投事件</b>！';
+        startBtn.textContent = '點擊進入戰場';
+        if (demoBtn) demoBtn.classList.remove('hidden');
+        switchModeBtn.classList.add('hidden');
+        if (loadoutPickerEl) loadoutPickerEl.style.display = '';
+        if (pauseBuildPanelEl) pauseBuildPanelEl.classList.add('hidden');
+      });
+    }
 
     muteBtn.addEventListener('click', () => {
       initAudio();
@@ -2499,7 +2615,7 @@
     }
 
     function takeDamage(amount, reason = '') {
-      if (invulnTimer > 0 || isGameOver) return;
+      if (isDemoMode || invulnTimer > 0 || isGameOver) return;
       if ((build.shieldCharges || 0) > 0) {
         build.shieldCharges--;
         invulnTimer = Math.max(invulnTimer, 0.45);
@@ -2771,7 +2887,8 @@
       updateHUD();
     }
 
-    function resetGame() {
+    function resetGame(demoFlag = isDemoMode) {
+      isDemoMode = !!demoFlag;
       enemies.forEach(e => scene.remove(e));
       enemyProjectiles.forEach(b => scene.remove(b));
       playerProjectiles.forEach(p => scene.remove(p));
@@ -2847,8 +2964,11 @@
       isMouseDown = false;
       isEspFireHeld = false;
       requireTriggerRelease = false;
-      camera.position.set(0, 1.7, 0);
+      camera.position.set(0, 1.7, isDemoMode ? 7.5 : 0);
       camera.rotation.set(0, 0, 0);
+      if (isDemoMode) {
+        spawnDemoDummy();
+      }
       updateHUD('PLAY');
     }
 
@@ -2860,6 +2980,8 @@
       const recRes = saveRunRecord(selectedLoadoutId, score, wave, kills);
       renderLoadoutPicker();
       if (loadoutPickerEl) loadoutPickerEl.style.display = '';
+      if (demoBtn) demoBtn.classList.remove('hidden');
+      if (switchModeBtn) switchModeBtn.classList.add('hidden');
       if (pauseBuildPanelEl) {
         renderPauseBuildPanel();
         pauseBuildPanelEl.classList.remove('hidden');
@@ -3012,7 +3134,15 @@
           py = R + ((py - R) / dr) * maxR;
         }
         const ud = e.userData;
-        if (ud.type === 'boss') {
+        if (ud.type === 'dummy') {
+          ctx.fillStyle = '#00ffcc';
+          ctx.strokeStyle = '#facc15';
+          ctx.lineWidth = 2;
+          ctx.beginPath();
+          ctx.arc(px, py, 5.5, 0, Math.PI * 2);
+          ctx.fill();
+          ctx.stroke();
+        } else if (ud.type === 'boss') {
           ctx.fillStyle = '#ff1f5a';
           ctx.strokeStyle = '#facc15';
           ctx.lineWidth = 2;
@@ -3246,8 +3376,10 @@
           }
         }
 
-        // 動態戰場事件調度與更新
-        if (!activeEvent) {
+        // 動態戰場事件調度與更新（演示模式不生成主動事件）
+        if (isDemoMode) {
+          if (eventBannerEl) eventBannerEl.classList.add('hidden');
+        } else if (!activeEvent) {
           eventCooldown -= dt;
           if (eventCooldown <= 0) {
             triggerArenaEvent();
@@ -3480,25 +3612,27 @@
           }
         }
 
-        // 檢查波次與生成敵人
-        const waveCfg = GameRoguelite.getWaveConfig(wave);
-        if (waveCfg.isBossWave && waveCfg.boss && bossSpawnedForWave !== wave) {
-          bossSpawnedForWave = wave;
-          spawnBoss(waveCfg.boss);
-        }
-
-        spawnTimer += dt;
-        const maxCount = waveCfg.isBossWave ? Math.max(8, Math.floor(waveCfg.maxEnemies * 0.55)) : waveCfg.maxEnemies;
-        if (enemies.length === 0 && !waveCfg.isBossWave) {
-          spawnTimer = Math.max(spawnTimer, waveCfg.spawnIntervalSec);
-        }
-        if (spawnTimer >= waveCfg.spawnIntervalSec && enemies.length < maxCount) {
-          const batch = Math.min(waveCfg.spawnBatch || 3, maxCount - enemies.length);
-          const squadAnchor = findSafeSpawnPos(16, 1.5);
-          for (let b = 0; b < batch; b++) {
-            spawnEnemy(squadAnchor);
+        // 檢查波次與生成敵人（演示模式僅保留中央標靶假人，不刷怪）
+        if (!isDemoMode) {
+          const waveCfg = GameRoguelite.getWaveConfig(wave);
+          if (waveCfg.isBossWave && waveCfg.boss && bossSpawnedForWave !== wave) {
+            bossSpawnedForWave = wave;
+            spawnBoss(waveCfg.boss);
           }
-          spawnTimer = 0;
+
+          spawnTimer += dt;
+          const maxCount = waveCfg.isBossWave ? Math.max(8, Math.floor(waveCfg.maxEnemies * 0.55)) : waveCfg.maxEnemies;
+          if (enemies.length === 0 && !waveCfg.isBossWave) {
+            spawnTimer = Math.max(spawnTimer, waveCfg.spawnIntervalSec);
+          }
+          if (spawnTimer >= waveCfg.spawnIntervalSec && enemies.length < maxCount) {
+            const batch = Math.min(waveCfg.spawnBatch || 3, maxCount - enemies.length);
+            const squadAnchor = findSafeSpawnPos(16, 1.5);
+            for (let b = 0; b < batch; b++) {
+              spawnEnemy(squadAnchor);
+            }
+            spawnTimer = 0;
+          }
         }
 
         // 執行延遲的 Boss 連彈排程
@@ -3548,7 +3682,10 @@
           toPlayer.y = 0;
           if (toPlayer.lengthSq() > 0.0001) toPlayer.normalize();
 
-          if (ud.type === 'boss') {
+          if (ud.type === 'dummy') {
+            e.rotation.y = Math.atan2(toPlayer.x, toPlayer.z);
+            e.position.y = (ud.baseY || 1.85) + Math.sin(now * 0.0025) * 0.08;
+          } else if (ud.type === 'boss') {
             if (ud.chargeHitCd > 0) ud.chargeHitCd -= dt;
             if (ud.bossState === 'windup') {
               ud.windupTimer -= dt * speedScale;
