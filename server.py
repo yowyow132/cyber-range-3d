@@ -5,15 +5,27 @@ Cyber Range 3D — 遊戲伺服器 ＋ 手機 HTTPS/WSS 陀螺儀中繼站
 - HTTPS + WSS (Port 8443): 手機端開啟 https://<電腦區網IP>:8443/gyro.html 當無線陀螺儀
 """
 
+import argparse
 import asyncio
 import datetime
 import ipaddress
 import json
 import mimetypes
+import re
+import shutil
 import socket
 import ssl
+import sys
+import webbrowser
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
+
+if hasattr(sys.stdout, "reconfigure"):
+    try:
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+        sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
 
 from cryptography import x509
 from cryptography.hazmat.primitives import hashes, serialization
@@ -41,6 +53,14 @@ mimetypes.add_type("image/png", ".png")
 
 GAME_CLIENTS: set = set()
 GYRO_CLIENTS: set = set()
+TUNNEL_STATE: dict = {
+    "enabled": False,
+    "status": "off",
+    "url": None,
+    "gyro_url": None,
+    "error": None,
+}
+TRYCLOUDFLARE_RE = re.compile(r"https://[a-z0-9-]+\.trycloudflare\.com", re.IGNORECASE)
 
 
 def get_lan_ips() -> list[str]:
@@ -142,6 +162,11 @@ async def handle_http_request(connection, request):
             "https_port": HTTPS_PORT,
             "gyro_urls": [f"https://{ip}:{HTTPS_PORT}/gyro.html" for ip in ips],
             "gyro_connected": len(GYRO_CLIENTS),
+            "tunnel_enabled": TUNNEL_STATE["enabled"],
+            "tunnel_status": TUNNEL_STATE["status"],
+            "tunnel_url": TUNNEL_STATE["url"],
+            "tunnel_gyro_url": TUNNEL_STATE["gyro_url"],
+            "tunnel_error": TUNNEL_STATE["error"],
         }).encode("utf-8")
         return make_http_response(200, "OK", "application/json; charset=utf-8", payload)
 
@@ -155,8 +180,12 @@ async def handle_http_request(connection, request):
     except Exception:
         return make_http_response(403, "Forbidden", "text/plain; charset=utf-8", b"Forbidden")
 
-    # 阻擋存取隱藏憑證資料夾與後端程式
-    if ".certs" in target.parts or target.name == "server.py":
+    # 阻擋存取隱藏憑證資料夾、虛擬環境、執行檔與後端程式
+    if (
+        ".certs" in target.parts
+        or ".venv" in target.parts
+        or target.name in ("server.py", "run.bat", "cloudflared.exe")
+    ):
         return make_http_response(403, "Forbidden", "text/plain; charset=utf-8", b"Forbidden")
 
     if not target.is_file():
@@ -199,6 +228,8 @@ async def ws_handler(websocket):
     else:
         status = f"connected:{len(GYRO_CLIENTS)}" if GYRO_CLIENTS else "disconnected:0"
         await websocket.send(f"GYRO_STATUS:{status}\n")
+        if TUNNEL_STATE["gyro_url"]:
+            await websocket.send(f"TUNNEL_URL:{TUNNEL_STATE['gyro_url']}\n")
 
     try:
         async for msg in websocket:
@@ -216,31 +247,124 @@ async def ws_handler(websocket):
             await broadcast(GAME_CLIENTS, f"GYRO_STATUS:{status}\n")
 
 
-async def main():
+def find_cloudflared() -> str | None:
+    local_exe = ROOT_DIR / "cloudflared.exe"
+    if local_exe.is_file():
+        return str(local_exe)
+    return shutil.which("cloudflared")
+
+
+async def run_cloudflare_tunnel():
+    """啟動 cloudflared quick tunnel 並自動解析公開 HTTPS 網址。"""
+    exe = find_cloudflared()
+    if not exe:
+        TUNNEL_STATE["status"] = "error"
+        TUNNEL_STATE["error"] = "找不到 cloudflared.exe"
+        print("⚠️  找不到 cloudflared.exe，略過公網穿牆通道（仍可使用同區網連線）。", flush=True)
+        return
+
+    TUNNEL_STATE["status"] = "starting"
+    print("⏳ 正在啟動 Cloudflare 穿牆通道（約 3~6 秒）...", flush=True)
+
+    proc = None
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            exe,
+            "tunnel",
+            "--no-autoupdate",
+            "--url",
+            f"http://127.0.0.1:{HTTP_PORT}",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT,
+        )
+        assert proc.stdout is not None
+        while True:
+            line_bytes = await proc.stdout.readline()
+            if not line_bytes:
+                break
+            line = line_bytes.decode("utf-8", errors="ignore").strip()
+            match = TRYCLOUDFLARE_RE.search(line)
+            if match and not TUNNEL_STATE["url"]:
+                base_url = match.group(0)
+                gyro_url = f"{base_url}/gyro.html"
+                TUNNEL_STATE["url"] = base_url
+                TUNNEL_STATE["gyro_url"] = gyro_url
+                TUNNEL_STATE["status"] = "ready"
+                TUNNEL_STATE["error"] = None
+                print("\n" + "=" * 60)
+                print("⚡ Cloudflare 穿牆通道已就緒！（學校防火牆可用）")
+                print(f"  手機 5G 陀螺儀網址: {gyro_url}")
+                print("  👉 直接在電腦遊戲點「📱 掃碼連手機陀螺儀」掃 QR Code 即可！")
+                print("=" * 60 + "\n", flush=True)
+                await broadcast(GAME_CLIENTS, f"TUNNEL_URL:{gyro_url}\n")
+
+        rc = await proc.wait()
+        if TUNNEL_STATE["status"] != "ready":
+            TUNNEL_STATE["status"] = "error"
+            TUNNEL_STATE["error"] = f"cloudflared 已結束 (code {rc})"
+            print(f"⚠️  cloudflared 啟動失敗 (code {rc})，仍可使用同區網連線。", flush=True)
+    except asyncio.CancelledError:
+        if proc and proc.returncode is None:
+            proc.terminate()
+            try:
+                await asyncio.wait_for(proc.wait(), timeout=3)
+            except asyncio.TimeoutError:
+                proc.kill()
+        raise
+    except Exception as exc:
+        TUNNEL_STATE["status"] = "error"
+        TUNNEL_STATE["error"] = str(exc)
+        print(f"⚠️  cloudflared 異常：{exc}", flush=True)
+
+
+async def main(enable_tunnel: bool = False, open_browser: bool = False):
     lan_ips = get_lan_ips()
     cert_path, key_path = ensure_self_signed_cert(lan_ips)
 
     ssl_ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
     ssl_ctx.load_cert_chain(certfile=str(cert_path), keyfile=str(key_path))
 
+    TUNNEL_STATE["enabled"] = enable_tunnel
+    TUNNEL_STATE["status"] = "starting" if enable_tunnel else "off"
+
     print("=" * 60)
     print("CYBER RANGE 3D 伺服器已啟動！")
     print(f"  電腦遊戲網址 (HTTP):  http://localhost:{HTTP_PORT}/")
     for ip in lan_ips:
-        print(f"  手機陀螺儀網址 (HTTPS): https://{ip}:{HTTPS_PORT}/gyro.html")
+        print(f"  同區網手機陀螺儀 (HTTPS): https://{ip}:{HTTPS_PORT}/gyro.html")
     if not lan_ips:
-        print(f"  手機陀螺儀網址 (HTTPS): https://<你的區網IP>:{HTTPS_PORT}/gyro.html")
+        print(f"  同區網手機陀螺儀 (HTTPS): https://<你的區網IP>:{HTTPS_PORT}/gyro.html")
     print("=" * 60, flush=True)
 
-    async with (
-        serve(ws_handler, "0.0.0.0", HTTP_PORT, process_request=handle_http_request),
-        serve(ws_handler, "0.0.0.0", HTTPS_PORT, ssl=ssl_ctx, process_request=handle_http_request),
-    ):
-        await asyncio.Future()
+    tunnel_task = None
+    try:
+        async with (
+            serve(ws_handler, "0.0.0.0", HTTP_PORT, process_request=handle_http_request, compression=None),
+            serve(ws_handler, "0.0.0.0", HTTPS_PORT, ssl=ssl_ctx, process_request=handle_http_request, compression=None),
+        ):
+            if open_browser:
+                try:
+                    webbrowser.open(f"http://localhost:{HTTP_PORT}/")
+                except Exception:
+                    pass
+            if enable_tunnel:
+                tunnel_task = asyncio.create_task(run_cloudflare_tunnel())
+            await asyncio.Future()
+    finally:
+        if tunnel_task and not tunnel_task.done():
+            tunnel_task.cancel()
+            try:
+                await tunnel_task
+            except asyncio.CancelledError:
+                pass
 
 
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Cyber Range 3D 本機遊戲與手機陀螺儀中繼伺服器")
+    parser.add_argument("--tunnel", action="store_true", help="自動啟動 cloudflared 穿牆通道")
+    parser.add_argument("--open", action="store_true", help="啟動後自動開啟瀏覽器遊戲頁面")
+    args = parser.parse_args()
     try:
-        asyncio.run(main())
+        asyncio.run(main(enable_tunnel=args.tunnel, open_browser=args.open))
     except KeyboardInterrupt:
         pass

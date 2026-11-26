@@ -651,13 +651,16 @@
 
   <!-- 手機陀螺儀 QR Code 配對視窗 -->
   <div id="gyro-qr-modal" style="display:none; position:fixed; inset:0; z-index:200; background:rgba(4,7,15,0.88); backdrop-filter:blur(6px); align-items:center; justify-content:center; padding:20px;">
-    <div style="background:#0f172a; border:1px solid rgba(0,255,204,0.45); border-radius:16px; padding:24px 26px; max-width:380px; width:100%; text-align:center; box-shadow:0 0 36px rgba(0,255,204,0.2);">
+    <div style="background:#0f172a; border:1px solid rgba(0,255,204,0.45); border-radius:16px; padding:24px 26px; max-width:390px; width:100%; text-align:center; box-shadow:0 0 36px rgba(0,255,204,0.2);">
       <div style="font-size:19px; font-weight:800; color:#00ffcc; margin-bottom:6px;">📱 手機掃碼直連陀螺儀</div>
-      <div style="font-size:13px; color:#94a3b8; margin-bottom:14px;">用手機相機掃描下方 QR Code 即可直接配對（免開伺服器）</div>
+      <div id="gyro-qr-subtitle" style="font-size:13px; color:#94a3b8; margin-bottom:14px;">用手機相機掃描下方 QR Code 即可直接配對（免開伺服器）</div>
       <div id="gyro-qr-box" style="display:inline-block; background:#ffffff; padding:12px; border-radius:12px; margin-bottom:12px; min-width:180px; min-height:180px;"></div>
       <div id="gyro-qr-status" style="font-size:13px; font-weight:700; color:#facc15; margin-bottom:10px;">⏳ 正在產生配對碼...</div>
       <div id="gyro-qr-url" style="font-size:11px; color:#64748b; word-break:break-all; background:rgba(2,6,23,0.6); padding:8px; border-radius:8px; margin-bottom:14px; user-select:all;"></div>
-      <button id="gyro-qr-close" style="padding:9px 22px; border-radius:8px; border:1px solid rgba(148,163,184,0.4); background:rgba(30,41,59,0.9); color:#e2e8f0; font-weight:700; cursor:pointer;">關閉視窗</button>
+      <div style="display:flex; gap:8px; justify-content:center; flex-wrap:wrap;">
+        <button id="gyro-qr-switch" style="display:none; padding:9px 14px; border-radius:8px; border:1px solid rgba(56,189,248,0.45); background:rgba(56,189,248,0.14); color:#7dd3fc; font-weight:700; font-size:12px; cursor:pointer;">切換配對通道</button>
+        <button id="gyro-qr-close" style="padding:9px 22px; border-radius:8px; border:1px solid rgba(148,163,184,0.4); background:rgba(30,41,59,0.9); color:#e2e8f0; font-weight:700; cursor:pointer;">關閉視窗</button>
+      </div>
     </div>
   </div>
 
@@ -1098,9 +1101,11 @@
     const wifiBtn = document.getElementById('wifi-btn');
     const gyroBtn = document.getElementById('gyro-btn');
     const gyroQrModal = document.getElementById('gyro-qr-modal');
+    const gyroQrSubtitle = document.getElementById('gyro-qr-subtitle');
     const gyroQrBox = document.getElementById('gyro-qr-box');
     const gyroQrStatus = document.getElementById('gyro-qr-status');
     const gyroQrUrlEl = document.getElementById('gyro-qr-url');
+    const gyroQrSwitch = document.getElementById('gyro-qr-switch');
     const gyroQrClose = document.getElementById('gyro-qr-close');
     let serialPort = null;
     let serialWriter = null;
@@ -1116,7 +1121,11 @@
     let gyroAimDc = null;
     let gyroCtrlDc = null;
     let gyroRtcConnected = false;
+    let gyroRtcLastOfferTs = 0;
     let gyroRemoteIceQueue = [];
+    let localServerInfo = null;
+    let gyroQrPreferredMode = 'local'; // 'local' (本機/Cloudflare通道) or 'cloud' (公用MQTT+P2P)
+    let localTunnelPollTimer = null;
     let gyroYawBuffer = 0;
     let gyroPitchBuffer = 0;
     let isPhoneGyroConnected = false;
@@ -1128,6 +1137,7 @@
       if (isWifiConnected) parts.push('Wi-Fi 無線槍控');
       else if (isEspConnected) parts.push('USB ESP32 槍控');
       if (gyroRtcConnected) parts.push('手機陀螺儀⚡P2P');
+      else if (gyroWsConnected) parts.push('手機陀螺儀⚡通道');
       else if (isPhoneGyroConnected) parts.push('手機陀螺儀');
       espStatusEl.textContent = parts.length ? parts.join(' + ') : '滑鼠 + 鍵盤';
     }
@@ -1135,7 +1145,9 @@
     function updatePhoneGyroUI() {
       isPhoneGyroConnected = gyroWsConnected || gyroMqttPeerAlive || gyroRtcConnected;
       if (isPhoneGyroConnected) {
-        gyroBtn.textContent = gyroRtcConnected ? '📱 手機陀螺儀 ⚡ P2P直連' : '📱 手機陀螺儀 ✅ 中繼已連';
+        if (gyroRtcConnected) gyroBtn.textContent = '📱 手機陀螺儀 ⚡ P2P直連';
+        else if (gyroWsConnected) gyroBtn.textContent = '📱 手機陀螺儀 ⚡ 通道直連';
+        else gyroBtn.textContent = '📱 手機陀螺儀 ✅ 雲端中繼';
         gyroBtn.style.background = 'rgba(0, 255, 204, 0.22)';
         gyroBtn.style.color = '#00ffcc';
         gyroBtn.style.borderColor = '#00ffcc';
@@ -1207,8 +1219,26 @@
         };
         requestAnimationFrame(spin);
       } else if (cmd.startsWith('GYRO_STATUS:')) {
+        const wasConnected = gyroWsConnected;
         gyroWsConnected = cmd.includes(':connected:');
         updatePhoneGyroUI();
+        if (!wasConnected && gyroWsConnected && gyroQrModal.style.display !== 'none') {
+          gyroQrStatus.textContent = '⚡ 手機已連上本機／穿牆通道！';
+          gyroQrStatus.style.color = '#00ffcc';
+          setTimeout(() => { gyroQrModal.style.display = 'none'; }, 600);
+        }
+      } else if (cmd.startsWith('TUNNEL_URL:')) {
+        const url = cmd.slice('TUNNEL_URL:'.length).trim();
+        if (url) {
+          localServerInfo = Object.assign({}, localServerInfo || {}, {
+            tunnel_enabled: true,
+            tunnel_status: 'ready',
+            tunnel_gyro_url: url,
+          });
+          if (gyroQrModal.style.display !== 'none' && gyroQrPreferredMode === 'local') {
+            renderLocalServerQr();
+          }
+        }
       } else if (cmd.startsWith('MOVE:')) {
         const parts = cmd.slice(5).split(',');
         const mx = parseFloat(parts[0]) || 0;
@@ -1326,6 +1356,15 @@
 
       async function startGyroWebRTCHost() {
         if (typeof RTCPeerConnection === 'undefined' || !gyroMqttClient || !gyroMqttClient.connected || !gyroRoomId) return;
+        const nowMs = Date.now();
+        if (
+          gyroRtcPc &&
+          (gyroRtcPc.connectionState === 'new' || gyroRtcPc.connectionState === 'connecting') &&
+          (nowMs - gyroRtcLastOfferTs < 2500)
+        ) {
+          return;
+        }
+        gyroRtcLastOfferTs = nowMs;
         closeGyroRtc();
         try {
           const pc = new RTCPeerConnection({
@@ -1444,20 +1483,117 @@
       });
     }
 
-    gyroQrClose.addEventListener('click', () => {
-      gyroQrModal.style.display = 'none';
-    });
+    async function fetchLocalServerInfo() {
+      if (!shouldUseLocalRelay() || location.protocol === 'file:') return null;
+      try {
+        const res = await fetch('/api/info', { cache: 'no-store' });
+        if (!res.ok) return null;
+        localServerInfo = await res.json();
+        return localServerInfo;
+      } catch (e) {
+        return null;
+      }
+    }
 
-    gyroBtn.addEventListener('click', () => {
+    function stopLocalTunnelPoll() {
+      if (localTunnelPollTimer) {
+        clearTimeout(localTunnelPollTimer);
+        localTunnelPollTimer = null;
+      }
+    }
+
+    function renderLocalServerQr() {
+      stopLocalTunnelPoll();
+      const info = localServerInfo;
+      if (!info) return false;
+
+      gyroQrSwitch.style.display = 'inline-block';
+      gyroQrSwitch.textContent = '改用雲端 P2P/MQTT';
+
+      if (info.tunnel_gyro_url) {
+        gyroQrSubtitle.textContent = '⚡ Cloudflare 穿牆通道（不走公用 MQTT，學校防火牆適用）';
+        renderQrForUrl(info.tunnel_gyro_url);
+        if (gyroWsConnected) {
+          gyroQrStatus.textContent = '⚡ 手機已連上穿牆通道！';
+          gyroQrStatus.style.color = '#00ffcc';
+        } else {
+          gyroQrStatus.textContent = '⏳ 請用手機 5G／Wi-Fi 掃描上方 QR Code 直連...';
+          gyroQrStatus.style.color = '#34d399';
+        }
+        return true;
+      }
+
+      if (info.tunnel_enabled && info.tunnel_status === 'starting') {
+        gyroQrSubtitle.textContent = '正在透過本機伺服器開啟 Cloudflare 穿牆通道...';
+        gyroQrBox.innerHTML = '<div style="padding:48px 16px; color:#0f172a; font-weight:700; font-size:14px;">⏳ 建立通道中<br><span style="font-size:12px; font-weight:500;">約需 3~6 秒</span></div>';
+        gyroQrUrlEl.textContent = '等待 https://*.trycloudflare.com/gyro.html ...';
+        gyroQrStatus.textContent = '⏳ 正在向 Cloudflare 取得穿牆網址...';
+        gyroQrStatus.style.color = '#facc15';
+        localTunnelPollTimer = setTimeout(async () => {
+          if (gyroQrModal.style.display === 'none' || gyroQrPreferredMode !== 'local') return;
+          await fetchLocalServerInfo();
+          renderLocalServerQr();
+        }, 1200);
+        return true;
+      }
+
+      const lanUrl = (info.gyro_urls && info.gyro_urls.length > 0) ? info.gyro_urls[0] : null;
+      if (lanUrl) {
+        gyroQrSubtitle.textContent = info.tunnel_error
+          ? `穿牆通道未啟用（${info.tunnel_error}），已切換同區網 HTTPS 直連`
+          : '本機區網 HTTPS 直連（手機與電腦需連同一 Wi-Fi）';
+        renderQrForUrl(lanUrl);
+        gyroQrStatus.textContent = gyroWsConnected
+          ? '⚡ 手機已連上本機區網通道！'
+          : '⏳ 手機掃碼後若跳憑證警告，請點「進階 → 繼續前往」';
+        gyroQrStatus.style.color = gyroWsConnected ? '#00ffcc' : '#facc15';
+        return true;
+      }
+      return false;
+    }
+
+    async function openGyroQrModal() {
       gyroQrModal.style.display = 'flex';
+      if (shouldUseLocalRelay() && gyroQrPreferredMode === 'local') {
+        const info = await fetchLocalServerInfo();
+        if (info && renderLocalServerQr()) {
+          return;
+        }
+      }
+
+      stopLocalTunnelPoll();
+      gyroQrSubtitle.textContent = '用手機相機掃描下方 QR Code 即可直接配對（雲端 P2P／MQTT）';
+      if (localServerInfo) {
+        gyroQrSwitch.style.display = 'inline-block';
+        gyroQrSwitch.textContent = '切回本機／穿牆通道';
+      } else {
+        gyroQrSwitch.style.display = 'none';
+      }
       ensureGyroMqttHost();
-      if (gyroMqttPeerAlive) {
-        gyroQrStatus.textContent = '✅ 手機陀螺儀已連線！';
+      if (gyroRtcConnected) {
+        gyroQrStatus.textContent = '⚡ WebRTC P2P 直連已建立！';
+        gyroQrStatus.style.color = '#00ffcc';
+      } else if (gyroMqttPeerAlive) {
+        gyroQrStatus.textContent = '✅ 手機陀螺儀已連線（雲端中繼）！';
         gyroQrStatus.style.color = '#34d399';
       } else if (gyroMqttClient && gyroMqttClient.connected) {
         gyroQrStatus.textContent = '⏳ 請用手機掃描上方 QR Code 配對...';
         gyroQrStatus.style.color = '#facc15';
       }
+    }
+
+    gyroQrSwitch.addEventListener('click', () => {
+      gyroQrPreferredMode = (gyroQrPreferredMode === 'local') ? 'cloud' : 'local';
+      openGyroQrModal();
+    });
+
+    gyroQrClose.addEventListener('click', () => {
+      stopLocalTunnelPoll();
+      gyroQrModal.style.display = 'none';
+    });
+
+    gyroBtn.addEventListener('click', () => {
+      openGyroQrModal();
     });
 
     espBtn.addEventListener('click', async () => {

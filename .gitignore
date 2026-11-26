@@ -11,3 +11,9 @@ desktop.ini
 *.log
 *.tmp
 .env
+
+# Local server runtime & tunnel binary
+.venv/
+.certs/
+__pycache__/
+cloudflared.exe

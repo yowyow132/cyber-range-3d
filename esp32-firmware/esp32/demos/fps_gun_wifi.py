@@ -11,7 +11,7 @@ Cyber Range 3D — ESP32 Wi-Fi 無線體感槍韌體範本 (WebSocket + 搖桿 +
    - RGB NeoPixel + 板載紅/黃/藍 LED：射擊橘白光、換彈藍光、受擊紅光、升級金光
    - 蜂鳴器 (GPIO 14)：非阻塞合成音效（開火／空倉／換彈／受擊／升級／陣亡）
 3. 擴充硬體（買到零件接好線後，將下方開關改成 True 即可啟用）：
-   - ENABLE_JOYSTICK = True：VRx=GPIO34, VRy=GPIO35, SW(下壓衝刺)=GPIO32 -> MOVE:x,y / DASH
+   - ENABLE_JOYSTICK = True：IO8 VRx=GPIO35, IO9 VRy=GPIO32, IO10 SW(下壓衝刺)=GPIO17 -> MOVE:x,y / DASH
    - ENABLE_MPU6050  = True：I2C (SDA=21, SCL=22, 0x68) -> AIM:dx,dy + 上抬體感跳躍 JUMP
 """
 
@@ -44,10 +44,10 @@ ENABLE_BUZZER = True
 ENABLE_LIGHT_FX = True
 BUZZER_DUTY = 320  # 蜂鳴器音量 (0~1023，建議 220~400)
 
-# 搖桿腳位建議使用 ADC1（避免與 Wi-Fi 衝突）
-PIN_JOY_X = 34
-PIN_JOY_Y = 35
-PIN_JOY_SW = 32
+# 搖桿腳位建議使用 ADC1（避免與 Wi-Fi 衝突，對應 EZ Start Kit+ IO8 / IO9 / IO10）
+PIN_JOY_X = 35
+PIN_JOY_Y = 32
+PIN_JOY_SW = 17
 
 
 # ==========================================

@@ -34,19 +34,21 @@
   - 僅在觸控／行動裝置（`pointer: coarse` 或手機 UA）顯示左下虛擬搖桿、右滑轉視角、開火／跳躍／衝刺／換彈／暫停鈕與橫屏自適應 HUD；電腦版完全隱藏。
 
 ### 2. ESP32 實體槍控韌體（`esp32-firmware/`）
-- `esp32/demos/fps_gun.py`：USB 有線 Web Serial 版本（含開火/換彈防抖、狀態同步與聲光回饋）。
+- `esp32/demos/fps_gun.py`：USB 有線 Web Serial 版本（含開火/換彈防抖、狀態同步、聲光回饋與外接類比搖桿支援）。
 - `esp32/demos/fps_gun_wifi.py`：Wi-Fi STA ＋ Port `8765` WebSocket Server（整合 OLED 狀態顯示、按鈕 A 開火 / 按鈕 B 換彈）。
 - **已開啟非阻塞聲光回饋（`ENABLE_BUZZER` / `ENABLE_LIGHT_FX`）**：兩版本均支援開火脈衝掃頻音效＋橘白閃光、空倉低音＋紅閃、換彈升調音＋藍光、受擊低頻警訊＋紅光、升級四音階琶音＋金光、陣亡關機音，並同步控制 NeoPixel 與板載紅/黃/藍 LED。
-- 已預留 `ENABLE_JOYSTICK`（GPIO 34/35/32）與 `ENABLE_MPU6050`（I2C 21/22）外接搖桿與陀螺儀開關（目前預設 `False`）。
+- **外接類比搖桿支援（EZ Start Kit+ 擴充排針）**：對應 `IO8 = GPIO 35`（VRx 左右）、`IO9 = GPIO 32`（VRy 前後）、`IO10 = GPIO 17`（SW 下壓觸發 `DASH`），具開機自動中心校正與 `0.14` 死區。`fps_gun.py` 預設 `ENABLE_JOYSTICK = True`（若未接搖桿請改回 `False` 以免浮接 ADC 飄移），`fps_gun_wifi.py` 預設 `False`；另有 `ENABLE_MPU6050`（I2C 21/22）可選配。
 - 附 `tools/upload.ps1`、`pyproject.toml`、`uv.lock` 供快速燒錄（Windows 若遇 `pyyaml` 編譯問題，建議以 `uv venv --python 3.12` 建立環境）。
 
 ### 3. 手機無線陀螺儀與體感中繼（`server.py`、`gyro.html`、`index.html`）
 - **免買外接感測器方案**：電腦接 USB ESP32 負責實體開槍/換彈/聲光，手機綁在槍上作為無線 6 軸陀螺儀與體感器，透過 Wi-Fi 或 5G 傳回電腦遊戲。
 - **GitHub Pages 免開伺服器 QR Code 極速直連（WebRTC P2P UDP + MQTT 握手）**：
   - 電腦端點選「`📱 掃碼連手機陀螺儀`」自動產生配對 **QR Code**，手機掃描後僅透過 `wss://broker.emqx.io:8084/mqtt` 進行約 1 秒握手配對，隨即自動升級為 **WebRTC `RTCDataChannel`（`ordered: false, maxRetransmits: 0` UDP 模式）直連**，完全繞過公網中繼與 TCP 隊頭阻塞（全速 60~120Hz 傳輸），若嚴格內網擋 UDP 則無縫維持 MQTT 備援；電腦端同時配備亞幀角度插值消耗機制消除無線微抖動。
-- **`server.py` 雙協議本機中繼伺服器（離線／嚴格防火牆備援）**：
-  - Port `8088`（HTTP + WS）：電腦開啟 `http://localhost:8088/` 玩遊戲並連接 USB ESP32。
-  - Port `8443`（HTTPS + WSS）：自動產生 `.certs/` 自簽憑證供同區網手機開啟 `https://<區網IP>:8443/gyro.html`；若電腦與手機不在同區網（如學校電腦＋手機 5G），可搭配 `cloudflared tunnel --url http://127.0.0.1:8088` 取得公網 HTTPS/WSS 通道。
+- **`run.bat` 一鍵啟動 ＋ `server.py` 雙協議／Cloudflare 穿牆伺服器**：
+  - 雙擊 `run.bat` 會自動建立 `.venv`、安裝 `websockets` 與 `cryptography`、若無 `cloudflared.exe` 則自動下載官方執行檔，並以 `--tunnel --open` 啟動 `server.py` 及開啟瀏覽器。
+  - Port `8088`（HTTP + WS，停用 WS 壓縮降低延遲）：電腦開啟 `http://localhost:8088/` 玩遊戲並連接 USB ESP32。
+  - Port `8443`（HTTPS + WSS）：自動產生 `.certs/` 自簽憑證供同區網手機開啟 `https://<區網IP>:8443/gyro.html`。
+  - `--tunnel` 自動拉起 `cloudflared` 取得 `https://*.trycloudflare.com/gyro.html`，透過 `/api/info` 與 `TUNNEL_URL:` 推播給遊戲頁面，讓 `index.html` 直接顯示免憑證警告、免同區網的 QR Code（並支援一鍵切換回「雲端 P2P／MQTT」模式）。
 - **`gyro.html` 手機體感控制器**：
   - **2 步自動方向校正（`🧭 自動校正`）**：依提示「往右轉」與「往上抬」即自動鎖定任意貼附角度（豎放／平放／橫放／側放）與正負號，並保存於 `localStorage`。
   - **體感跳躍與衝刺**：以低通濾波追蹤世界垂直重力方向，自動分離「快速上抬 (`JUMP`)」與「快速往前推 (`DASH`)」，含防回彈與防轉身誤觸濾波及可調門檻滑桿。
@@ -62,9 +64,8 @@
 1. **燒錄 ESP32 前記得補回 Wi-Fi 帳密**：
    - `esp32-firmware/esp32/demos/fps_gun_wifi.py` 為安全起見已移除密碼（目前是 `YOUR_WIFI_SSID` / `YOUR_WIFI_PASSWORD`），在新電腦燒錄前請先填上熱點帳密，再於 `esp32-firmware/` 執行 `uv sync --python 3.12` 與 `powershell -ExecutionPolicy Bypass -File .\tools\upload.ps1 -Lesson fps_gun_wifi`（需先確認有裝 CH340/CP210x USB 驅動）。
 2. **啟動電腦遊戲＋手機陀螺儀伺服器**：
-   - 執行 `esp32-firmware\.venv\Scripts\python.exe server.py`，電腦開 `http://localhost:8088/`。
-   - **同區網（家裡 Wi-Fi）**：手機開 `https://<電腦區網IP>:8443/gyro.html`。
-   - **不同網路（學校電腦＋手機 5G）**：另開 `cloudflared tunnel --url http://127.0.0.1:8088`，手機用 5G 開產生的 `https://*.trycloudflare.com/gyro.html` 即可連線。
+   - **一鍵啟動（推薦，適用學校防火牆／手機 5G）**：直接雙擊根目錄 **`run.bat`**，會自動備妥環境、啟動 `server.py --tunnel --open`、自動開啟瀏覽器並於遊戲「`📱 掃碼連手機陀螺儀`」彈窗直接顯示 Cloudflare 穿牆 QR Code。
+   - **手動啟動**：執行 `.venv\Scripts\python.exe server.py`（可加 `--tunnel --open`），電腦開 `http://localhost:8088/`；同區網手機開 `https://<電腦區網IP>:8443/gyro.html`。
 3. **「手機當螢幕 + ESP32 無線玩」連線限制（重要）**：
    - GitHub Pages 網址為 `https://`，瀏覽器會因 **Mixed Content 安全規範** 阻擋連線 ESP32 的未加密 `ws://<ESP32_IP>:8765`。
    - 要用手機螢幕連 ESP32 時，請讓**電腦與 ESP32 連同一個手機熱點**，電腦開 `server.py`（或 `python -m http.server 8088`），手機瀏覽器改開 **`http://<電腦區網IP>:8088/`**，即可配對 `📶 Wi-Fi 無線槍控`。

@@ -4,6 +4,9 @@
 # 硬體對應：
 #   按鈕 A (GPIO 5)  = 扣扳機 (送出 FIRE_DOWN / FIRE_UP，含開火音效與槍口閃光)
 #   按鈕 B (GPIO 36) = 換彈夾 (送出 RELOAD，含上膛音效與藍光)
+#   搖桿 IO8 (GPIO 35)  = VRx (左右移動)
+#   搖桿 IO9 (GPIO 32)  = VRy (前後移動)
+#   搖桿 IO10 (GPIO 17) = SW  (下壓衝刺 DASH)
 #   OLED 螢幕        = 顯示子彈數(支援擴容)、血量條、即時狀態
 #   WS2812 RGB + LED = 開火閃橘光、受傷閃紅光、換彈閃藍光、升級閃金光
 #   蜂鳴器 (GPIO 14) = 非阻塞合成音效（開火／空倉／換彈／受擊／升級／陣亡）
@@ -26,6 +29,33 @@ except:
 ENABLE_BUZZER = True
 ENABLE_LIGHT_FX = True
 BUZZER_DUTY = 320  # 蜂鳴器音量 (0~1023，建議 220~400)
+
+# 外接類比搖桿設定 (EZ Start Kit+ 擴充排針 IO8 / IO9 / IO10)
+ENABLE_JOYSTICK = True
+PIN_JOY_X = 35      # IO8 (ADC1)
+PIN_JOY_Y = 32      # IO9 (ADC1)
+PIN_JOY_SW = 17     # IO10 (數位上拉，下壓觸發衝刺 DASH)
+JOY_SWAP_XY = False
+JOY_INVERT_X = False
+JOY_INVERT_Y = False
+JOY_DEADZONE = 0.14
+
+
+def _norm_axis(raw, center):
+    """將 12-bit ADC 讀值依自動校正中心點正規化為 [-1.0, 1.0] 並套用死區。"""
+    if raw >= center:
+        span = max(1, 4095 - center)
+        val = (raw - center) / span
+    else:
+        span = max(1, center)
+        val = (raw - center) / span
+    if val > 1.0:
+        val = 1.0
+    elif val < -1.0:
+        val = -1.0
+    if abs(val) < JOY_DEADZONE:
+        return 0.0
+    return val
 
 spoll = select.poll()
 spoll.register(sys.stdin, select.POLLIN)
@@ -146,6 +176,33 @@ def main():
     last_raw_b = 1
     last_change_b = 0
 
+    joy_x = joy_y = joy_sw = None
+    joy_cx = 2048
+    joy_cy = 2048
+    stable_sw = 1
+    last_raw_sw = 1
+    last_change_sw = 0
+    last_joy_ms = 0
+    was_moving = False
+
+    if ENABLE_JOYSTICK:
+        joy_x = ADC(Pin(PIN_JOY_X))
+        joy_y = ADC(Pin(PIN_JOY_Y))
+        joy_x.atten(ADC.ATTN_11DB)
+        joy_y.atten(ADC.ATTN_11DB)
+        joy_sw = Pin(PIN_JOY_SW, Pin.IN, Pin.PULL_UP)
+
+        sx = 0
+        sy = 0
+        for _ in range(10):
+            sx += joy_x.read()
+            sy += joy_y.read()
+            time.sleep_ms(4)
+        avg_x = sx // 10
+        avg_y = sy // 10
+        joy_cx = avg_x if 1000 <= avg_x <= 3100 else 2048
+        joy_cy = avg_y if 1000 <= avg_y <= 3100 else 2048
+
     rgb_clear_ms = 0
     rx_buf = ""
     need_redraw = True
@@ -192,6 +249,32 @@ def main():
                 set_board_leds(0, 0, 1)
                 play_sfx("reload")
                 rgb_clear_ms = time.ticks_add(now, 300)
+
+        # --- 2.5 外接搖桿移動 (MOVE:x,y) 與下壓衝刺 (DASH) ---
+        if ENABLE_JOYSTICK and joy_x:
+            raw_sw = joy_sw.value()
+            if raw_sw != last_raw_sw:
+                last_raw_sw = raw_sw
+                last_change_sw = now
+            elif time.ticks_diff(now, last_change_sw) >= 35 and raw_sw != stable_sw:
+                stable_sw = raw_sw
+                if stable_sw == 0:
+                    sys.stdout.write("DASH\n")
+
+            if time.ticks_diff(now, last_joy_ms) >= 30:
+                last_joy_ms = now
+                vx = _norm_axis(joy_x.read(), joy_cx)
+                vy = _norm_axis(joy_y.read(), joy_cy)
+                if JOY_SWAP_XY:
+                    vx, vy = vy, vx
+                if JOY_INVERT_X:
+                    vx = -vx
+                if JOY_INVERT_Y:
+                    vy = -vy
+                moving = (vx != 0.0 or vy != 0.0)
+                if moving or was_moving:
+                    sys.stdout.write("MOVE:{:.2f},{:.2f}\n".format(vx, vy))
+                    was_moving = moving
 
         # --- 3. 讀取電腦同步狀態 (S:ammo,hp,state,max_ammo) ---
         while spoll.poll(0):
